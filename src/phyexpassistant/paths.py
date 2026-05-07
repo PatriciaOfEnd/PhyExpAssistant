@@ -5,6 +5,7 @@ import os
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_ROOT = Path(__file__).resolve().parent
 
 
 def project_path(*parts: str | Path) -> Path:
@@ -12,6 +13,17 @@ def project_path(*parts: str | Path) -> Path:
     for part in parts:
         path = path / Path(part)
     return path
+
+
+def package_path(*parts: str | Path) -> Path:
+    path = PACKAGE_ROOT
+    for part in parts:
+        path = path / Path(part)
+    return path
+
+
+def app_icon_path() -> Path:
+    return package_path("assets", "app_icon.jpg")
 
 
 def app_home() -> Path:

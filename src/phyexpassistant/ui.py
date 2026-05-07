@@ -7,7 +7,7 @@ import json
 import sys
 
 from .llm_client import LLMClient, LLMError
-from .paths import app_home, resolve_input_path
+from .paths import app_home, app_icon_path, resolve_input_path
 from .settings import Settings, load_settings, save_settings
 from .workflow import (
     B_UNCERTAINTY_METHODS,
@@ -536,10 +536,21 @@ def _svg_chevron_down(color: str) -> str:
 </svg>'''
 
 
+def _set_windows_app_user_model_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PatriciaOfEnd.PhyExpAssistant")
+    except Exception:
+        pass
+
+
 def launch_ui(argv: list[str] | None = None) -> int:
     try:
         from PySide6.QtCore import QDate, QEvent, Qt, QUrl
-        from PySide6.QtGui import QColor, QDesktopServices, QFont
+        from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon
         from PySide6.QtWidgets import (
             QApplication,
             QButtonGroup,
@@ -607,6 +618,7 @@ def launch_ui(argv: list[str] | None = None) -> int:
             "QColor": QColor,
             "QDesktopServices": QDesktopServices,
             "QFont": QFont,
+            "QIcon": QIcon,
         }
     )
 
@@ -1384,8 +1396,14 @@ def launch_ui(argv: list[str] | None = None) -> int:
             if message:
                 self._set_status(message)
 
+    _set_windows_app_user_model_id()
     app = QApplication.instance() or QApplication([sys.argv[0]])
+    app_icon = QIcon(str(app_icon_path()))
+    app.setApplicationName("PhyExpAssistant")
+    app.setApplicationDisplayName("PhyExpAssistant Demo")
+    app.setWindowIcon(app_icon)
     window = MainWindow()
+    window.setWindowIcon(app_icon)
     window.show()
     return app.exec()
 
