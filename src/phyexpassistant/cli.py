@@ -7,16 +7,14 @@ import json
 import os
 import sys
 
-from .experiments import get_experiment, get_experiment_by_name, list_experiments
+from .experiments import get_experiment, list_experiments
 from .llm_client import LLMClient, LLMError
-from .paths import project_path, resolve_input_path
+from .paths import resolve_input_path
 from .settings import Settings, load_settings, save_settings
 from .workflow import (
     B_UNCERTAINTY_METHODS,
     WorkflowError,
     generate_report,
-    load_request_csv,
-    load_request_json,
 )
 
 
@@ -46,11 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
     parser = argparse.ArgumentParser(description="PhyExpAssistant demo")
     parser.add_argument("--ui", action="store_true", help="启动 PySide6 图形界面")
-    parser.add_argument("--sample", action="store_true", help="使用内置样例数据生成报告")
-    parser.add_argument("--json", type=Path, help="从 JSON 输入生成报告")
-    parser.add_argument("--csv", type=Path, help="从 CSV 输入生成报告")
-    parser.add_argument("--experiment", help="实验名称或后台实验 ID；省略时默认使用第一个实验")
-    parser.add_argument("--no-llm", action="store_true", help="不调用 LLM，使用本地模板文字")
+    parser.add_argument("--no-llm", action="store_true", help="手动录入生成报告时不调用 LLM；手写识别仍需 LLM API")
     args = parser.parse_args(argv)
 
     if args.ui:
@@ -59,24 +53,10 @@ def main(argv: list[str] | None = None) -> int:
         return launch_ui(argv or sys.argv[:1])
 
     settings = load_settings()
-    experiment_id = _resolve_experiment_selector(args.experiment) if args.experiment else _default_experiment_id()
-    if args.sample:
-        request = load_request_json(project_path("data", "samples", "pendulum.json"))
-        _apply_experiment(request, experiment_id)
-        return _run_request(request, settings, use_llm=not args.no_llm)
-    if args.json:
-        request = load_request_json(args.json)
-        _apply_experiment(request, experiment_id)
-        return _run_request(request, settings, use_llm=not args.no_llm)
-    if args.csv:
-        print("CSV 模式需要补充学生信息。")
-        request = load_request_csv(args.csv, _prompt_student(), _prompt_options(), experiment_id=experiment_id)
-        return _run_request(request, settings, use_llm=not args.no_llm)
-
-    return _interactive_loop(settings)
+    return _interactive_loop(settings, use_llm=not args.no_llm)
 
 
-def _interactive_loop(settings: Settings) -> int:
+def _interactive_loop(settings: Settings, *, use_llm: bool = True) -> int:
     while True:
         _clear_screen()
         print("\n=== PhyExpAssistant Demo ===")
@@ -84,11 +64,9 @@ def _interactive_loop(settings: Settings) -> int:
         print(f"LLM Model: {settings.model}")
         print(f"API Key: {settings.masked_api_key}")
         print("1. 设置 API Key / Model")
-        print("2. 生成报告：JSON 文件")
-        print("3. 生成报告：CSV 文件")
-        print("4. 生成报告：手动录入")
-        print("5. 生成报告：手写图片（LLM OCR demo）")
-        print("6. 查看支持的实验")
+        print("2. 生成报告：手动录入")
+        print("3. 生成报告：手写图片（LLM OCR demo）")
+        print("4. 查看支持的实验")
         print("0. 退出")
         choice = input("请选择：").strip()
 
@@ -96,24 +74,13 @@ def _interactive_loop(settings: Settings) -> int:
             if choice == "1":
                 settings = _settings_screen(settings)
             elif choice == "2":
-                experiment_id = _prompt_experiment_id()
-                path = _prompt_path("JSON 文件路径：")
-                request = load_request_json(path)
-                _apply_experiment(request, experiment_id)
-                _run_request(request, settings)
-            elif choice == "3":
-                experiment_id = _prompt_experiment_id()
-                path = _prompt_path("CSV 文件路径：")
-                request = load_request_csv(path, _prompt_student(), _prompt_options(), experiment_id=experiment_id)
-                _run_request(request, settings)
-            elif choice == "4":
                 request = _manual_input_request(_prompt_experiment_id())
-                _run_request(request, settings)
-            elif choice == "5":
+                _run_request(request, settings, use_llm=use_llm)
+            elif choice == "3":
                 request = _ocr_input_request(settings, _prompt_experiment_id())
                 if request:
-                    _run_request(request, settings)
-            elif choice == "6":
+                    _run_request(request, settings, use_llm=use_llm)
+            elif choice == "4":
                 _print_experiments()
             elif choice == "0":
                 return 0
@@ -202,7 +169,7 @@ def _ocr_input_request(settings: Settings, experiment_id: str) -> dict | None:
     print("\n--- 识别结果草稿 ---")
     print(json.dumps(request, ensure_ascii=False, indent=2))
     if not _yes_no("是否确认使用该识别结果生成报告？", default=False):
-        print("已取消。你可以改用 JSON/CSV/手动录入。")
+        print("已取消。你可以改用手动录入或重新识别。")
         return None
 
     student = request.get("student") or {}
@@ -228,18 +195,6 @@ def _print_experiments() -> None:
     print("\n当前 demo 支持：")
     for index, experiment in enumerate(list_experiments(), start=1):
         print(f"{index}. {experiment['name']}（{experiment['description']}）")
-
-
-def _default_experiment_id() -> str:
-    return list_experiments()[0]["id"]
-
-
-def _resolve_experiment_selector(selector: str) -> str:
-    selector = selector.strip()
-    try:
-        return get_experiment(selector)["id"]
-    except ValueError:
-        return get_experiment_by_name(selector)["id"]
 
 
 def _prompt_experiment_id() -> str:

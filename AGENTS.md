@@ -2,14 +2,13 @@
 
 ## 项目结构与模块组织
 
-本仓库是基于 `src` 布局的 Python 3.10+ 项目。核心包位于 `src/phyexpassistant/`，其中 `cli.py` 提供命令行入口，`ui.py` 提供图形界面，`workflow.py` 编排数据校验、计算与报告生成流程。实验定义和资源放在 `src/phyexpassistant/resources/`，提示词放在 `src/phyexpassistant/prompts/`，图标等静态资源放在 `src/phyexpassistant/assets/`。示例输入位于 `data/samples/`，运行产物默认写入 `data/outputs/<run_id>/`。项目说明和设计文档位于 `README.md` 与 `docs/`。
+本仓库是基于 `src` 布局的 Python 3.10+ 项目。核心包位于 `src/phyexpassistant/`，其中 `cli.py` 提供命令行入口，`ui.py` 提供图形界面，`workflow.py` 编排数据校验、计算与报告生成流程。`docx_writer.py` 负责 Word 模板渲染、原始照片插入和 LaTeX 公式标记解析。实验定义和资源放在 `src/phyexpassistant/resources/`，提示词放在 `src/phyexpassistant/prompts/`，图标等静态资源放在 `src/phyexpassistant/assets/`。用户生成入口限定为手动录入与手写识别，运行产物默认写入 `data/outputs/<run_id>/`。项目说明和设计文档位于 `README.md` 与 `docs/`。
 
 ## 构建、测试与开发命令
 
 - `python demo.py`：直接启动交互式 CLI，无需安装包。
+- `python demo.py --no-llm`：启动交互式 CLI；手动录入生成报告时跳过 LLM 报告文字生成。
 - `python demo.py --ui`：启动 PySide6 图形界面；需要安装 UI 可选依赖。
-- `python demo.py --sample --no-llm`：使用内置样例执行无 LLM 的冒烟验证。
-- `python demo.py --json data/samples/pendulum.json --no-llm`：从 JSON 样例生成报告。
 - `python -m pip install -e ".[ui]"`：以可编辑模式安装项目及 UI 依赖。
 
 ## 编码风格与命名约定
@@ -18,7 +17,7 @@
 
 ## 测试指南
 
-当前仓库未配置正式测试框架。修改计算、解析或报告生成逻辑后，至少运行 `python demo.py --sample --no-llm` 和相关 JSON 样例命令进行冒烟测试。新增测试时建议使用 `pytest`，测试文件放在 `tests/`，命名为 `test_<module>.py`，用例覆盖正常路径、输入校验失败和边界数值。
+当前仓库未配置正式测试框架。修改计算、解析或报告生成逻辑后，至少运行 `python demo.py --no-llm`，通过 CLI 手动录入一组最小数据并生成报告；涉及 UI 时同时启动 `python demo.py --ui` 做界面冒烟检查；涉及 Word 模板时额外确认原始实验数据、实验数据处理、实验结果和不确定度计算等栏目正确输出。新增测试时建议使用 `pytest`，测试文件放在 `tests/`，命名为 `test_<module>.py`，用例覆盖正常路径、输入校验失败和边界数值。
 
 ## 提交与 Pull Request 规范
 
@@ -26,4 +25,4 @@ Git 历史使用简短英文提交信息，例如 `Add application icon`、`Refi
 
 ## 安全与配置提示
 
-不要提交 `.phyexpassistant/settings.json`、API Key 或真实实验隐私数据。可用 `PHYEXPASSISTANT_HOME` 覆盖配置目录，用 `PHYEXPASSISTANT_OUTPUT_DIR` 覆盖输出目录。处理 LLM 或 OCR 结果时保留用户确认与 schema 校验流程，避免直接信任模型输出。
+不要提交 `.phyexpassistant/settings.json`、API Key 或真实实验隐私数据。可用 `PHYEXPASSISTANT_HOME` 覆盖配置目录，用 `PHYEXPASSISTANT_OUTPUT_DIR` 覆盖输出目录。处理 LLM 或 OCR 结果时保留用户确认与 schema 校验流程，避免直接信任模型输出。保持 UI 备注分流：OCR 备注只传给 `extract_handwritten_data()`，报告生成备注只传给 `generate_report_content()`，不要写入 `normalized_input` 或固定 Word 正文。

@@ -23,7 +23,7 @@ class LLMClient:
             raise LLMError("请先在交互界面设置 API Key、Base URL 和 Model。")
         self.settings = settings
 
-    def extract_handwritten_data(self, image_path: Path, experiment_id: str) -> dict:
+    def extract_handwritten_data(self, image_path: Path, experiment_id: str, note: str | None = None) -> dict:
         image_path = image_path.expanduser().resolve()
         if not image_path.exists():
             raise LLMError(f"图片不存在：{image_path}")
@@ -48,6 +48,7 @@ class LLMClient:
         data_url = f"data:{mime_type};base64,{image_b64}"
         field_specs_json = json.dumps(field_specs, ensure_ascii=False, indent=2)
         target_json = json.dumps(target_template, ensure_ascii=False, indent=2)
+        note_text = str(note or "").strip()
 
         system_prompt = (
             "你是物理实验数据录入助手。请从手写实验数据图片中识别实验数据，"
@@ -56,6 +57,11 @@ class LLMClient:
         )
         user_text = f"""
 请识别图片中的实验数据，并整理成如下 JSON。当前 demo 选择的实验模板为：{experiment_label}，后台 experiment_id={experiment_id}。
+
+用户备注：
+{note_text if note_text else '无'}
+
+备注仅用于辅助识别与约束输出风格，不要把备注原文写入 JSON 结果。
 
 字段说明：
 {field_specs_json}
@@ -77,18 +83,28 @@ class LLMClient:
         ]
         return self._chat_json(system_prompt, content)
 
-    def generate_report_content(self, normalized_input: dict, experiment: dict) -> dict:
+    def generate_report_content(self, normalized_input: dict, experiment: dict, note: str | None = None) -> dict:
         experiment_name = normalized_input.get("experiment_name") or experiment.get("name") or "未知实验"
         experiment_description = normalized_input.get("experiment_description") or experiment.get("description") or ""
+        note_text = str(note or "").strip()
         system_prompt = (
             "你是物理实验报告写作助手。只能根据给定 JSON 写实验报告内容，"
             "不得编造数据，不得修改字段名，只输出 JSON。"
             "你需要根据不同实验模板生成该实验专属的公式说明、数据处理说明、结果总结和误差分析。"
+            "报告模板栏目固定为：原始实验数据、实验数据处理、实验结果、不确定度计算、误差分析、课后思考题。"
+            "generic_processing_summary 应说明 OCR/录入数据如何整理成表格，不要重复输出完整原始数据表。"
+            "generic_formula_lines 应重点用于“实验结果”栏目：针对每个需要计算的物理量，按脱式计算方式逐行列出公式、代入数据和计算结果。"
+            "uncertainty_summary 应用于“不确定度计算”栏目，需按 A 类不确定度、B 类不确定度（如有）、总不确定度、最终 计算值 ± 不确定度 的顺序组织。"
             "本地程序不会替你做实验专属推导；请根据 experiment.fields 和 normalized_input 自行组织内容。"
             "若某个字段的 b_uncertainty.enabled 为 false，把它当作没有提供，不要写“未启用”“未提供”“为 0”等程序状态。"
             "如果所有字段都没有启用 B 类不确定度，不要提及 B 类不确定度或矢量合成。"
-            "generic_formula_lines 应返回适合 Word 直接排版的简洁公式文本，不要输出 Markdown、代码块或 LaTeX 包裹。"
+            "需要 Word 公式渲染的 LaTeX 片段必须使用 {{LaTeXbegin}} 和 {{LaTeXend}} 成对包裹，"
+            "例如 {{LaTeXbegin}}T=2\\pi\\sqrt{L/g}{{LaTeXend}}。"
+            "不要使用 $...$、$$...$$、\\(...\\)、\\[...\\] 或 Markdown 代码块包裹公式。"
+            "generic_formula_lines 应返回简洁的公式说明；可包含普通中文说明和被标记包裹的 LaTeX 公式。"
+            "LaTeX 公式尽量使用 \\frac{}{}、\\sqrt{}、上标 ^、下标 _ 和常见希腊字母命令。"
             "如果实验模板或数据不足以给出数值结果，请明确说明原因，但不要提及系统内部流程。"
+            "如果提供了报告生成备注，只把它当作写作约束，不要原文复述到最终 JSON 里，也不要把它当成新的输出字段。"
         )
         user_payload = {
             "task": "根据实验模板和结构化数据生成实验报告内容。",
@@ -101,7 +117,7 @@ class LLMClient:
                 "fields": experiment.get("fields") or {},
             },
             "output_schema": {
-                "generic_formula_lines": ["string"],
+                "generic_formula_lines": ["string，公式片段用 {{LaTeXbegin}}...{{LaTeXend}} 标记"],
                 "generic_processing_summary": "string",
                 "generic_result_headers": ["string"],
                 "generic_result_rows": [["string"]],
@@ -113,6 +129,8 @@ class LLMClient:
             },
             "normalized_input": normalized_input,
         }
+        if note_text:
+            user_payload["report_generation_note"] = note_text
         return self._chat_json(system_prompt, json.dumps(user_payload, ensure_ascii=False))
 
     def plan_plots(self, normalized_input: dict, experiment: dict, report_content: dict) -> dict:

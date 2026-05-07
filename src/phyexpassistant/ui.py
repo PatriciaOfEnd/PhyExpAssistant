@@ -14,7 +14,6 @@ from .workflow import (
     B_UNCERTAINTY_METHODS,
     WorkflowError,
     generate_report,
-    load_request_json,
 )
 
 
@@ -806,6 +805,74 @@ def launch_ui(argv: list[str] | None = None) -> int:
             if window is not None and hasattr(window, "_apply_manual_layout_profile"):
                 window._apply_manual_layout_profile(reset_scroll=False)
 
+    class OcrUncertaintyControl(QWidget):
+        def __init__(self, field_label: str, unit: str, scale: float, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._field_label = field_label
+            self._scale = scale
+
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(_scaled(8, scale, minimum=6))
+
+            self.b_checkbox = QCheckBox("计算 B 类不确定度", self)
+            self.b_checkbox.toggled.connect(self._toggle_uncertainty_input)
+            self.division_label = QLabel("分度值", self)
+            self.division_input = QLineEdit(self)
+            self.division_input.setPlaceholderText("仪器分度值")
+            self.division_input.setMinimumWidth(_scaled(130, scale, minimum=110))
+            self.division_unit_label = QLabel(unit, self)
+            self.method_combo = QComboBox(self)
+            self.method_combo.addItem(B_UNCERTAINTY_METHODS["half_division_uniform"]["label"], "half_division_uniform")
+            self.method_combo.addItem(B_UNCERTAINTY_METHODS["division_uniform"]["label"], "division_uniform")
+            self.method_combo.setMinimumWidth(_scaled(190, scale, minimum=160))
+
+            layout.addWidget(self.b_checkbox, 0)
+            layout.addWidget(self.division_label, 0)
+            layout.addWidget(self.division_input, 0)
+            layout.addWidget(self.division_unit_label, 0)
+            layout.addWidget(self.method_combo, 0)
+            layout.addStretch(1)
+            self._toggle_uncertainty_input(False)
+
+        def set_uncertainty(self, uncertainty: dict | None) -> None:
+            uncertainty = uncertainty or {}
+            enabled = bool(uncertainty.get("enabled"))
+            self.b_checkbox.setChecked(enabled)
+            self.division_input.setText(str(uncertainty.get("division") or ""))
+            method = str(uncertainty.get("method") or "half_division_uniform")
+            index = self.method_combo.findData(method)
+            if index >= 0:
+                self.method_combo.setCurrentIndex(index)
+            self._toggle_uncertainty_input(enabled)
+
+        def uncertainty(self) -> dict | None:
+            if not self.b_checkbox.isChecked():
+                return None
+            division_text = self.division_input.text().strip()
+            if not division_text:
+                raise ValueError(f"{self._field_label} 已勾选 B 类不确定度，请填写仪器分度值。")
+            division_value = float(division_text)
+            if division_value <= 0:
+                raise ValueError(f"{self._field_label} 的仪器分度值必须大于 0。")
+            return {
+                "enabled": True,
+                "division": division_value,
+                "unit": self.division_unit_label.text(),
+                "method": self.method_combo.currentData(),
+            }
+
+        def _toggle_uncertainty_input(self, checked: bool) -> None:
+            self.division_label.setVisible(checked)
+            self.division_input.setVisible(checked)
+            self.division_unit_label.setVisible(checked)
+            self.method_combo.setVisible(checked)
+            self.adjustSize()
+            self.updateGeometry()
+            window = self.window()
+            if window is not None and hasattr(window, "_resize_ocr_table"):
+                window._resize_ocr_table()
+
     class ThemeSettingsDialog(QDialog):
         def __init__(self, parent_window: "MainWindow") -> None:
             super().__init__(parent_window)
@@ -953,7 +1020,7 @@ def launch_ui(argv: list[str] | None = None) -> int:
             self._theme_palette = build_theme_palette(self.settings)
             self.setWindowTitle("PhyExpAssistant Demo")
             self.setMinimumSize(self._s(760, minimum=620), self._s(520, minimum=430))
-            self.resize(self._s(1040, minimum=820), self._s(680, minimum=560))
+            self.resize(self._s(1600, minimum=820), self._s(900, minimum=560))
             self._build_ui(app)
             self._apply_theme()
             self._apply_settings_to_form()
@@ -1103,22 +1170,6 @@ def launch_ui(argv: list[str] | None = None) -> int:
 
             left_column.addWidget(settings_card)
 
-            student_card = QGroupBox("学生信息")
-            student_layout = QFormLayout(student_card)
-            student_layout.setLabelAlignment(Qt.AlignRight)
-
-            self.student_name_input = QLineEdit()
-            self.student_id_input = QLineEdit()
-            self.class_name_input = QLineEdit()
-            self.date_input = FlatDatePicker(self._ui_scale)
-            self.date_input.setDate(QDate.currentDate())
-
-            student_layout.addRow("姓名", self.student_name_input)
-            student_layout.addRow("学号", self.student_id_input)
-            student_layout.addRow("班级", self.class_name_input)
-            student_layout.addRow("日期", self.date_input)
-            left_column.addWidget(student_card)
-
             options_card = QGroupBox("输出选项")
             options_layout = QVBoxLayout(options_card)
             self.include_thinking_checkbox = QCheckBox("包含思考题")
@@ -1133,15 +1184,12 @@ def launch_ui(argv: list[str] | None = None) -> int:
 
             quick_card = QGroupBox("快捷操作")
             quick_layout = QGridLayout(quick_card)
-            self.load_sample_button = QPushButton("加载样例")
-            self.load_sample_button.clicked.connect(self._load_sample)
             self.open_output_button = QPushButton("打开输出目录")
             self.open_output_button.clicked.connect(self._open_output_dir)
             self.open_report_button = QPushButton("打开最近报告")
             self.open_report_button.clicked.connect(self._open_report)
-            quick_layout.addWidget(self.load_sample_button, 0, 0)
-            quick_layout.addWidget(self.open_output_button, 0, 1)
-            quick_layout.addWidget(self.open_report_button, 1, 0, 1, 2)
+            quick_layout.addWidget(self.open_output_button, 0, 0)
+            quick_layout.addWidget(self.open_report_button, 0, 1)
             left_column.addWidget(quick_card)
             left_column.addStretch(1)
 
@@ -1149,7 +1197,6 @@ def launch_ui(argv: list[str] | None = None) -> int:
             self.tabs.setMinimumWidth(self._s(680, minimum=560))
             right_column.addWidget(self.tabs, 1)
 
-            self.tabs.addTab(self._build_json_tab(), "JSON / CSV")
             self.tabs.addTab(self._build_manual_tab(), "手动录入")
             self.tabs.addTab(self._build_ocr_tab(), "手写识别")
 
@@ -1163,42 +1210,6 @@ def launch_ui(argv: list[str] | None = None) -> int:
             footer_layout.addWidget(self.status_label, 1)
             footer_layout.addWidget(self.report_path_label, 2)
             root_layout.addWidget(footer)
-
-        def _build_json_tab(self) -> QWidget:
-            tab = QWidget()
-            layout = QVBoxLayout(tab)
-            layout.setSpacing(self._s(14, minimum=8))
-
-            json_card = QGroupBox("从 JSON 生成报告")
-            json_layout = QHBoxLayout(json_card)
-            self.json_path_input = QLineEdit()
-            self.json_path_input.setPlaceholderText("选择 JSON 输入文件")
-            json_browse = QPushButton("浏览")
-            json_browse.clicked.connect(lambda: self._pick_file(self.json_path_input, "JSON 文件 (*.json)"))
-            json_generate = QPushButton("生成 JSON 报告")
-            json_generate.setObjectName("primaryButton")
-            json_generate.clicked.connect(self._generate_from_json)
-            json_layout.addWidget(self.json_path_input, 1)
-            json_layout.addWidget(json_browse)
-            json_layout.addWidget(json_generate)
-
-            csv_card = QGroupBox("从 CSV 生成报告")
-            csv_layout = QHBoxLayout(csv_card)
-            self.csv_path_input = QLineEdit()
-            self.csv_path_input.setPlaceholderText("选择 CSV 输入文件")
-            csv_browse = QPushButton("浏览")
-            csv_browse.clicked.connect(lambda: self._pick_file(self.csv_path_input, "CSV 文件 (*.csv)"))
-            csv_generate = QPushButton("生成 CSV 报告")
-            csv_generate.setObjectName("primaryButton")
-            csv_generate.clicked.connect(self._generate_from_csv)
-            csv_layout.addWidget(self.csv_path_input, 1)
-            csv_layout.addWidget(csv_browse)
-            csv_layout.addWidget(csv_generate)
-
-            layout.addWidget(json_card)
-            layout.addWidget(csv_card)
-            layout.addStretch(1)
-            return tab
 
         def _build_manual_tab(self) -> QWidget:
             tab = QWidget()
@@ -1223,6 +1234,45 @@ def launch_ui(argv: list[str] | None = None) -> int:
             self.manual_scroll_layout.setSpacing(self._s(14, minimum=8))
             self.manual_scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
+            self.manual_photo_card = QGroupBox("选择实验报告照片", self.manual_scroll_content)
+            self.manual_photo_card.setObjectName("manualPhotoCard")
+            self.manual_photo_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            photo_layout = QVBoxLayout(self.manual_photo_card)
+            photo_layout.setContentsMargins(self._s(12, minimum=8), self._s(10, minimum=8), self._s(12, minimum=8), self._s(10, minimum=8))
+            photo_layout.setSpacing(self._s(8, minimum=6))
+            photo_row = QHBoxLayout()
+            photo_row.setSpacing(self._s(8, minimum=6))
+            self.manual_report_photo_input = QLineEdit(self.manual_photo_card)
+            self.manual_report_photo_input.setPlaceholderText("选择本地实验报告照片路径")
+            photo_browse_button = QPushButton("浏览", self.manual_photo_card)
+            photo_browse_button.clicked.connect(
+                lambda: self._pick_file(self.manual_report_photo_input, "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff)")
+            )
+            photo_row.addWidget(self.manual_report_photo_input, 1)
+            photo_row.addWidget(photo_browse_button, 0)
+            photo_layout.addLayout(photo_row)
+            photo_hint_label = QLabel("仅本地选择，不参与 LLM 处理。", self.manual_photo_card)
+            photo_hint_label.setObjectName("themeHint")
+            photo_hint_label.setWordWrap(True)
+            photo_layout.addWidget(photo_hint_label)
+
+            self.manual_student_card = QGroupBox("学生信息", self.manual_scroll_content)
+            self.manual_student_card.setObjectName("manualStudentCard")
+            self.manual_student_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            student_layout = QFormLayout(self.manual_student_card)
+            student_layout.setLabelAlignment(Qt.AlignRight)
+
+            self.student_name_input = QLineEdit(self.manual_student_card)
+            self.student_id_input = QLineEdit(self.manual_student_card)
+            self.class_name_input = QLineEdit(self.manual_student_card)
+            self.date_input = FlatDatePicker(self._ui_scale, self.manual_student_card)
+            self.date_input.setDate(QDate.currentDate())
+
+            student_layout.addRow("姓名", self.student_name_input)
+            student_layout.addRow("学号", self.student_id_input)
+            student_layout.addRow("班级", self.class_name_input)
+            student_layout.addRow("日期", self.date_input)
+
             self.manual_fields_container = QWidget(self.manual_scroll_content)
             self.manual_fields_container.setObjectName("manualFieldsContainer")
             self.manual_fields_layout = QVBoxLayout(self.manual_fields_container)
@@ -1235,68 +1285,160 @@ def launch_ui(argv: list[str] | None = None) -> int:
             self.manual_footer_container = QWidget(tab)
             self.manual_footer_container.setObjectName("manualFooterContainer")
             self.manual_footer_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            self.manual_footer_layout = QHBoxLayout(self.manual_footer_container)
+            self.manual_footer_layout = QVBoxLayout(self.manual_footer_container)
             self.manual_footer_layout.setContentsMargins(0, 0, 0, 0)
-            self.manual_footer_layout.setSpacing(0)
+            self.manual_footer_layout.setSpacing(self._s(8, minimum=6))
+            (
+                self.manual_report_note_card,
+                self.manual_report_note_checkbox,
+                self.manual_report_note_input,
+            ) = self._build_report_note_controls(self.manual_footer_container)
             self.manual_generate_button = QPushButton("生成手动录入报告")
             self.manual_generate_button.setObjectName("primaryButton")
             self.manual_generate_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self.manual_generate_button.clicked.connect(self._generate_from_manual)
+            self.manual_footer_layout.addWidget(self.manual_report_note_card)
             self.manual_footer_layout.addWidget(self.manual_generate_button)
 
+            self.manual_scroll_layout.addWidget(self.manual_photo_card)
+            self.manual_scroll_layout.addWidget(self.manual_student_card)
             self.manual_scroll_layout.addWidget(self.manual_fields_container)
             self.manual_scroll_area.setWidget(self.manual_scroll_content)
 
             layout.addWidget(self.manual_scroll_area, 1)
             layout.addWidget(self.manual_footer_container, 0)
-            layout.addStretch(1)
             self._rebuild_manual_inputs()
             return tab
 
         def _build_ocr_tab(self) -> QWidget:
             tab = QWidget()
             layout = QVBoxLayout(tab)
+            layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(self._s(14, minimum=8))
 
-            image_card = QGroupBox("手写图片识别")
+            self.ocr_scroll_area = QScrollArea(tab)
+            self.ocr_scroll_area.setObjectName("ocrScrollArea")
+            self.ocr_scroll_area.setWidgetResizable(True)
+            self.ocr_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+            self.ocr_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.ocr_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.ocr_scroll_area.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            self.ocr_scroll_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+            self.ocr_scroll_content = QWidget(self.ocr_scroll_area)
+            self.ocr_scroll_content.setObjectName("ocrScrollContent")
+            self.ocr_scroll_content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            ocr_content_layout = QVBoxLayout(self.ocr_scroll_content)
+            ocr_content_layout.setContentsMargins(0, 0, self._s(4, minimum=2), 0)
+            ocr_content_layout.setSpacing(self._s(14, minimum=8))
+            ocr_content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+            note_card = QGroupBox("备注", self.ocr_scroll_content)
+            note_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            note_layout = QVBoxLayout(note_card)
+            self.ocr_note_input = QPlainTextEdit(note_card)
+            self.ocr_note_input.setPlaceholderText("可填写给 LLM 的识别备注，例如：表格第一列是序号、某列单位为 cm、请优先按从左到右顺序读取。此内容只用于图片识别 prompt。")
+            self.ocr_note_input.setMinimumHeight(self._s(90, minimum=72))
+            note_layout.addWidget(self.ocr_note_input)
+
+            image_card = QGroupBox("手写图片识别", self.ocr_scroll_content)
+            image_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             image_layout = QHBoxLayout(image_card)
-            self.image_path_input = QLineEdit()
+            self.image_path_input = QLineEdit(image_card)
             self.image_path_input.setPlaceholderText("选择手写数据图片")
-            image_browse = QPushButton("浏览")
+            image_browse = QPushButton("浏览", image_card)
             image_browse.clicked.connect(lambda: self._pick_file(self.image_path_input, "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp)"))
-            ocr_button = QPushButton("LLM 识别")
+            ocr_button = QPushButton("LLM 识别", image_card)
             ocr_button.clicked.connect(self._run_ocr)
             image_layout.addWidget(self.image_path_input, 1)
             image_layout.addWidget(image_browse)
             image_layout.addWidget(ocr_button)
 
-            preview_card = QGroupBox("识别结果预览")
+            preview_card = QGroupBox("识别结果预览", self.ocr_scroll_content)
             preview_layout = QVBoxLayout(preview_card)
-            self.ocr_warning_label = QLabel("尚未识别。")
+            preview_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.ocr_warning_label = QLabel("尚未识别。", preview_card)
             self.ocr_warning_label.setWordWrap(True)
             self.ocr_warning_label.setObjectName("themeHint")
-            self.ocr_result_table = QTableWidget(0, 6)
-            self.ocr_result_table.setHorizontalHeaderLabels(["字段", "名称", "单位", "数值", "原始识别", "置信度"])
+            self.ocr_result_table = QTableWidget(0, 7, preview_card)
+            self.ocr_result_table.setHorizontalHeaderLabels(["字段", "名称", "单位", "数值", "原始识别", "置信度", "B 类不确定度"])
             self.ocr_result_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            self.ocr_result_table.setMinimumHeight(self._s(180, minimum=140))
+            self.ocr_result_table.setFixedHeight(self._s(220, minimum=180))
+            self.ocr_result_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.ocr_result_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.ocr_result_table.setColumnWidth(6, self._s(520, minimum=420))
+            self.ocr_uncertainty_controls: dict[str, OcrUncertaintyControl] = {}
+            self.ocr_preview_card = preview_card
             preview_layout.addWidget(self.ocr_warning_label)
             preview_layout.addWidget(self.ocr_result_table)
+            preview_card.setMinimumHeight(self._s(280, minimum=230))
 
-            raw_card = QGroupBox("Raw JSON")
+            raw_card = QGroupBox("结构化识别草稿", self.ocr_scroll_content)
+            raw_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             raw_layout = QVBoxLayout(raw_card)
-            self.ocr_preview = QPlainTextEdit()
-            self.ocr_preview.setPlaceholderText("点击 LLM 识别后，这里会显示原始 JSON 草稿，用户可手动修正。")
+            self.ocr_preview = QPlainTextEdit(raw_card)
+            self.ocr_preview.setPlaceholderText("点击 LLM 识别后，这里会显示结构化识别草稿，用户可手动修正。")
+            self.ocr_preview.setFixedHeight(self._s(260, minimum=200))
             raw_layout.addWidget(self.ocr_preview)
 
-            ocr_generate = QPushButton("使用当前草稿生成报告")
+            self.ocr_footer_container = QWidget(tab)
+            self.ocr_footer_container.setObjectName("ocrFooterContainer")
+            self.ocr_footer_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            ocr_footer_layout = QVBoxLayout(self.ocr_footer_container)
+            ocr_footer_layout.setContentsMargins(0, 0, 0, 0)
+            ocr_footer_layout.setSpacing(self._s(8, minimum=6))
+
+            ocr_generate = QPushButton("使用当前草稿生成报告", self.ocr_footer_container)
             ocr_generate.setObjectName("primaryButton")
             ocr_generate.clicked.connect(self._generate_from_ocr_preview)
+            (
+                self.ocr_report_note_card,
+                self.ocr_report_note_checkbox,
+                self.ocr_report_note_input,
+            ) = self._build_report_note_controls(self.ocr_footer_container)
 
-            layout.addWidget(image_card)
-            layout.addWidget(preview_card, 1)
-            layout.addWidget(raw_card, 1)
-            layout.addWidget(ocr_generate)
+            ocr_content_layout.addWidget(note_card)
+            ocr_content_layout.addWidget(image_card)
+            ocr_content_layout.addWidget(preview_card)
+            ocr_content_layout.addWidget(raw_card)
+            self.ocr_scroll_area.setWidget(self.ocr_scroll_content)
+
+            ocr_footer_layout.addWidget(self.ocr_report_note_card)
+            ocr_footer_layout.addWidget(ocr_generate)
+
+            layout.addWidget(self.ocr_scroll_area, 1)
+            layout.addWidget(self.ocr_footer_container, 0)
             return tab
+
+        def _build_report_note_controls(self, parent: QWidget) -> tuple[QGroupBox, QCheckBox, QPlainTextEdit]:
+            note_card = QGroupBox("报告生成备注", parent)
+            note_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            note_layout = QVBoxLayout(note_card)
+            note_layout.setContentsMargins(
+                self._s(12, minimum=8),
+                self._s(10, minimum=8),
+                self._s(12, minimum=8),
+                self._s(10, minimum=8),
+            )
+            note_layout.setSpacing(self._s(8, minimum=6))
+            note_checkbox = QCheckBox("启用报告生成备注", note_card)
+            note_input = QPlainTextEdit(note_card)
+            note_input.setPlaceholderText(
+                "可填写给 LLM 的报告生成备注，例如：强调有效数字、按指定顺序写误差分析、结果总结更简洁。此内容只用于报告生成 prompt。"
+            )
+            note_input.setMinimumHeight(self._s(90, minimum=72))
+            note_layout.addWidget(note_checkbox)
+            note_layout.addWidget(note_input)
+
+            def set_note_enabled(checked: bool) -> None:
+                note_input.setVisible(checked)
+                note_input.setEnabled(checked)
+                note_card.adjustSize()
+                note_card.updateGeometry()
+
+            note_checkbox.toggled.connect(set_note_enabled)
+            set_note_enabled(False)
+            return note_card, note_checkbox, note_input
 
         def _apply_settings_to_form(self) -> None:
             self.base_url_input.setText(self.settings.base_url)
@@ -1323,12 +1465,6 @@ def launch_ui(argv: list[str] | None = None) -> int:
             self._set_status("设置已保存")
             QMessageBox.information(self, "保存成功", "LLM 设置已保存到本地。")
 
-        def _load_sample(self) -> None:
-            sample = resolve_input_path("data/samples/pendulum.json")
-            self.json_path_input.setText(str(sample))
-            self.tabs.setCurrentIndex(0)
-            self._set_status("已加载样例 JSON 路径")
-
         def _pick_file(self, target: QLineEdit, filter_text: str) -> None:
             path, _ = QFileDialog.getOpenFileName(self, "选择文件", str(Path.cwd()), filter_text)
             if path:
@@ -1352,31 +1488,6 @@ def launch_ui(argv: list[str] | None = None) -> int:
             else:
                 QMessageBox.warning(self, "提示", f"报告不存在：{path}")
 
-        def _generate_from_json(self) -> None:
-            try:
-                request = load_request_json(resolve_input_path(self.json_path_input.text().strip()))
-                self._apply_selected_experiment(request)
-                request["options"] = self._current_options()
-                self._run_generation(request)
-            except Exception as exc:
-                self._show_error(exc)
-
-        def _generate_from_csv(self) -> None:
-            try:
-                from .workflow import load_request_csv
-
-                student = self._current_student()
-                options = self._current_options()
-                request = load_request_csv(
-                    resolve_input_path(self.csv_path_input.text().strip()),
-                    student,
-                    options,
-                    experiment_id=self._selected_experiment_id(),
-                )
-                self._run_generation(request)
-            except Exception as exc:
-                self._show_error(exc)
-
         def _generate_from_manual(self) -> None:
             try:
                 data = {}
@@ -1393,6 +1504,12 @@ def launch_ui(argv: list[str] | None = None) -> int:
                     "data": data,
                     "source": "manual",
                 }
+                photo_path = self.manual_report_photo_input.text().strip()
+                if photo_path:
+                    request["original_photo_path"] = photo_path
+                report_note = self._report_generation_note("manual")
+                if report_note:
+                    request["report_generation_note"] = report_note
                 self._run_generation(request)
             except Exception as exc:
                 self._show_error(exc)
@@ -1402,14 +1519,20 @@ def launch_ui(argv: list[str] | None = None) -> int:
                 settings = self._collect_settings()
                 if not settings.is_llm_ready:
                     raise LLMError("请先填写 Base URL、Model 和 API Key。")
-                image_path = resolve_input_path(self.image_path_input.text().strip())
+                image_path_text = self.image_path_input.text().strip()
+                if not image_path_text:
+                    raise ValueError("请先选择手写图片。")
+                image_path = resolve_input_path(image_path_text)
+                if not image_path.is_file():
+                    raise ValueError(f"手写图片不存在或不是文件：{image_path}")
+                note = self.ocr_note_input.toPlainText().strip() if hasattr(self, "ocr_note_input") else ""
                 self._set_busy(True, "正在识别手写图片...")
-                request = LLMClient(settings).extract_handwritten_data(image_path, self._selected_experiment_id())
+                request = LLMClient(settings).extract_handwritten_data(image_path, self._selected_experiment_id(), note=note)
                 self._apply_selected_experiment(request)
                 request.setdefault("source", str(image_path))
                 self._render_ocr_result(request)
                 self.ocr_preview.setPlainText(json.dumps(request, ensure_ascii=False, indent=2))
-                self._set_status("OCR 识别完成，请检查并修正 JSON 草稿。")
+                self._set_status("OCR 识别完成，请检查并修正结构化草稿。")
             except Exception as exc:
                 self._show_error(exc)
             finally:
@@ -1417,15 +1540,50 @@ def launch_ui(argv: list[str] | None = None) -> int:
 
         def _generate_from_ocr_preview(self) -> None:
             try:
-                request = json.loads(self.ocr_preview.toPlainText())
+                preview_text = self.ocr_preview.toPlainText().strip()
+                if not preview_text:
+                    raise ValueError("请先完成手写识别或粘贴结构化草稿。")
+                request = json.loads(preview_text)
                 self._apply_selected_experiment(request)
-                self._render_ocr_result(request)
+                self._apply_ocr_uncertainties_to_request(request)
                 if not request.get("student"):
                     request["student"] = self._current_student()
                 request["options"] = self._current_options()
+                self.ocr_preview.setPlainText(json.dumps(request, ensure_ascii=False, indent=2))
+                self._render_ocr_result(request)
+                report_note = self._report_generation_note("ocr")
+                if report_note:
+                    request["report_generation_note"] = report_note
                 self._run_generation(request)
             except Exception as exc:
                 self._show_error(exc)
+
+        def _report_generation_note(self, scope: str) -> str:
+            checkbox = getattr(self, f"{scope}_report_note_checkbox", None)
+            note_input = getattr(self, f"{scope}_report_note_input", None)
+            if checkbox is None or note_input is None or not checkbox.isChecked():
+                return ""
+            return note_input.toPlainText().strip()
+
+        def _apply_ocr_uncertainties_to_request(self, request: dict) -> None:
+            controls = getattr(self, "ocr_uncertainty_controls", {})
+            if not controls:
+                return
+            data = request.setdefault("data", {})
+            fields = self._selected_experiment().get("fields") or {}
+            for field_name, control in controls.items():
+                field_meta = fields.get(field_name, {})
+                field_data = data.get(field_name, {})
+                unit, values = self._preview_field_unit_values(field_data, field_meta)
+                if isinstance(field_data, dict):
+                    updated_field_data = dict(field_data)
+                    updated_field_data.setdefault("unit", unit)
+                    updated_field_data.setdefault("values", values)
+                else:
+                    updated_field_data = {"unit": unit, "values": values}
+                uncertainty = control.uncertainty()
+                updated_field_data["b_uncertainty"] = uncertainty or {"enabled": False}
+                data[field_name] = updated_field_data
 
         def _run_generation(self, request: dict) -> None:
             settings = self._collect_settings()
@@ -1515,6 +1673,10 @@ def launch_ui(argv: list[str] | None = None) -> int:
                 self.manual_scroll_area.setMinimumHeight(viewport_height)
 
             self.manual_scroll_content.setMinimumWidth(content_width)
+            if hasattr(self, "manual_photo_card"):
+                self.manual_photo_card.setMinimumWidth(content_width)
+            if hasattr(self, "manual_student_card"):
+                self.manual_student_card.setMinimumWidth(content_width)
             self.manual_fields_container.setMinimumWidth(content_width)
             if hasattr(self, "manual_footer_container"):
                 self.manual_footer_container.setMinimumWidth(content_width)
@@ -1528,6 +1690,21 @@ def launch_ui(argv: list[str] | None = None) -> int:
             if reset_scroll and hasattr(self, "manual_scroll_area"):
                 self.manual_scroll_area.verticalScrollBar().setValue(0)
                 self.manual_scroll_area.horizontalScrollBar().setValue(0)
+
+        def _resize_ocr_table(self) -> None:
+            if not hasattr(self, "ocr_result_table"):
+                return
+            self.ocr_result_table.setColumnWidth(6, self._s(560, minimum=440))
+            self.ocr_result_table.resizeRowsToContents()
+            for row_index in range(self.ocr_result_table.rowCount()):
+                cell_widget = self.ocr_result_table.cellWidget(row_index, 6)
+                widget_height = cell_widget.sizeHint().height() if cell_widget is not None else 0
+                row_height = max(self._s(30, minimum=26), widget_height + self._s(6, minimum=4))
+                self.ocr_result_table.setRowHeight(row_index, row_height)
+            self.ocr_result_table.setFixedHeight(self._s(220, minimum=180))
+            if hasattr(self, "ocr_preview_card"):
+                self.ocr_preview_card.adjustSize()
+                self.ocr_preview_card.updateGeometry()
 
         def _refresh_experiment_dependent_ui(self) -> None:
             if hasattr(self, "manual_fields_layout"):
@@ -1577,6 +1754,7 @@ def launch_ui(argv: list[str] | None = None) -> int:
             fields = experiment.get("fields") or {}
             field_names = [*fields.keys(), *[key for key in data.keys() if key not in fields]]
             recognized_cells = ocr_meta.get("recognized_cells") or []
+            self.ocr_uncertainty_controls = {}
             self.ocr_result_table.setRowCount(len(field_names))
             for row_index, field_name in enumerate(field_names):
                 field_meta = fields.get(field_name, {})
@@ -1595,7 +1773,14 @@ def launch_ui(argv: list[str] | None = None) -> int:
                 ]
                 for column_index, value in enumerate(row_values):
                     self.ocr_result_table.setItem(row_index, column_index, QTableWidgetItem(str(value)))
+                control = OcrUncertaintyControl(field_meta.get("label") or field_name, unit, self._ui_scale, self.ocr_result_table)
+                if isinstance(field_data, dict):
+                    control.set_uncertainty(field_data.get("b_uncertainty"))
+                self.ocr_uncertainty_controls[field_name] = control
+                self.ocr_result_table.setCellWidget(row_index, 6, control)
+                self.ocr_result_table.setRowHeight(row_index, max(self._s(46, minimum=40), control.sizeHint().height() + self._s(10, minimum=6)))
             self.ocr_result_table.resizeColumnsToContents()
+            self._resize_ocr_table()
 
         def _preview_field_unit_values(self, field_data: object, field_meta: dict) -> tuple[str, list[object]]:
             if isinstance(field_data, dict):
@@ -1668,7 +1853,7 @@ def _build_header(settings_button: object, scale: float):
     title_box.setSpacing(_scaled(2, scale, minimum=1))
     title = QLabel("PhyExpAssistant Demo")
     title.setObjectName("headerTitle")
-    subtitle = QLabel("扁平化、本地优先、Windows / Linux 双端适配")
+    subtitle = QLabel("Powered by PatriciaOfEnd & LyCecilion - 大学物理实验轻量化、自动化解决方案")
     subtitle.setObjectName("headerSubtitle")
     title_box.addWidget(title)
     title_box.addWidget(subtitle)

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-import csv
 import json
 import uuid
 
 from .docx_writer import write_docx
 from .experiments import get_experiment
 from .llm_client import LLMClient, LLMError
-from .paths import output_root, resolve_input_path
+from .paths import output_root
 from .plotting import write_safe_plot
 from .settings import Settings
 
@@ -32,38 +31,10 @@ class WorkflowError(RuntimeError):
     pass
 
 
-def load_request_json(path: Path) -> dict:
-    path = resolve_input_path(path)
-    if not path.exists():
-        raise WorkflowError(f"JSON 文件不存在：{path}")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return _with_defaults(data, source=str(path))
-
-
-def load_request_csv(path: Path, student: dict, options: dict | None = None, experiment_id: str = "exp_001") -> dict:
-    path = resolve_input_path(path)
-    if not path.exists():
-        raise WorkflowError(f"CSV 文件不存在：{path}")
-    with path.open("r", encoding="utf-8-sig", newline="") as file:
-        rows = list(csv.DictReader(file))
-    if not rows:
-        raise WorkflowError("CSV 文件没有数据行。")
-
-    experiment = get_experiment(experiment_id)
-    data = _read_csv_generic_data(rows, experiment)
-
-    request = {
-        "experiment_id": experiment_id,
-        "student": student,
-        "options": options or {},
-        "data": data,
-    }
-    return _with_defaults(request, source=str(path))
-
-
 def generate_report(request: dict, settings: Settings, *, use_llm: bool = True) -> dict:
     request = _with_defaults(request, source=request.get("source", "unknown"))
     experiment = get_experiment(request["experiment_id"])
+    original_photo_path = _resolve_original_photo_path(request)
     run_id = _make_run_id(request["experiment_id"])
     run_dir = OUTPUT_ROOT / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -79,7 +50,7 @@ def generate_report(request: dict, settings: Settings, *, use_llm: bool = True) 
     if use_llm and settings.is_llm_ready:
         try:
             llm = LLMClient(settings)
-            llm_report_content = llm.generate_report_content(normalized, experiment)
+            llm_report_content = llm.generate_report_content(normalized, experiment, note=request.get("report_generation_note"))
             report_content = _sanitize_generic_narrative(llm_report_content, report_content, normalized)
         except LLMError as exc:
             warnings.append(f"LLM 报告内容生成失败，已使用本地通用模板：{exc}")
@@ -108,7 +79,13 @@ def generate_report(request: dict, settings: Settings, *, use_llm: bool = True) 
     _write_json(run_dir / "narrative.result.json", report_content)
     _write_json(run_dir / "plot.plan.json", plot_plan)
 
-    render_context = build_generic_render_context(normalized, report_content, figures, plot_plan)
+    render_context = build_generic_render_context(
+        normalized,
+        report_content,
+        figures,
+        plot_plan,
+        original_photo_path=original_photo_path,
+    )
     validate_render_context(render_context, experiment["render_contract"])
     _write_json(run_dir / "render.context.json", render_context)
 
@@ -123,6 +100,7 @@ def generate_report(request: dict, settings: Settings, *, use_llm: bool = True) 
         "source": request.get("source"),
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "model": settings.model if settings.is_llm_ready and use_llm else None,
+        "original_photo_path": original_photo_path,
         "artifacts": {
             "request": str(run_dir / "input.request.json"),
             "normalized_input": str(run_dir / "input.normalized.json"),
@@ -228,6 +206,8 @@ def build_generic_render_context(
     report_content: dict,
     figures: list[dict],
     plot_plan: dict,
+    *,
+    original_photo_path: str | None = None,
 ) -> dict:
     student = normalized["student"]
     return {
@@ -241,6 +221,7 @@ def build_generic_render_context(
         "experiment_id": normalized["experiment_id"],
         "experiment_name": normalized["experiment_name"],
         "experiment_description": normalized.get("experiment_description") or "",
+        "original_photo_path": original_photo_path,
         "raw_headers": normalized["raw_headers"],
         "raw_rows": normalized["raw_rows"],
         "generic_formula_lines": report_content.get("generic_formula_lines") or [],
@@ -374,7 +355,7 @@ def _with_defaults(request: dict, source: str) -> dict:
     except (TypeError, ValueError):
         forced_plot_count = 1
     options["forced_plot_count"] = max(1, min(3, forced_plot_count))
-    return {
+    normalized_request = {
         "experiment_id": request.get("experiment_id") or "exp_001",
         "student": {
             "name": student.get("name") or "",
@@ -386,49 +367,12 @@ def _with_defaults(request: dict, source: str) -> dict:
         "data": request.get("data") or {},
         "source": request.get("source") or source,
         "ocr_meta": request.get("ocr_meta"),
+        "original_photo_path": request.get("original_photo_path") or request.get("manual_report_photo_path"),
     }
-
-
-def _read_csv_generic_data(rows: list[dict], experiment: dict) -> dict:
-    headers = set(rows[0].keys())
-    data = {}
-    for field_name, spec in (experiment.get("fields") or {}).items():
-        selected, unit = _select_generic_csv_column(headers, field_name, spec)
-        if not selected:
-            raise WorkflowError(f"CSV 缺少字段 {spec.get('label') or field_name}，可用列名：{', '.join(_generic_csv_candidates(field_name, spec))}")
-        data[field_name] = {
-            "unit": unit,
-            "values": [_to_float(row.get(selected), selected) for row in rows],
-        }
-    return data
-
-
-def _select_generic_csv_column(headers: set[str], field_name: str, spec: dict) -> tuple[str | None, str]:
-    base_unit = spec.get("base_unit") or ""
-    candidates = _generic_csv_candidates(field_name, spec)
-    for candidate, unit in candidates.items():
-        if candidate in headers:
-            return candidate, unit
-    return None, base_unit
-
-
-def _generic_csv_candidates(field_name: str, spec: dict) -> dict[str, str]:
-    label = spec.get("label") or field_name
-    base_unit = spec.get("base_unit") or ""
-    candidates = {field_name: base_unit, label: base_unit}
-    for unit in spec.get("accepted_units") or [base_unit]:
-        candidates[f"{field_name}_{unit}"] = unit
-        candidates[f"{label}_{unit}"] = unit
-    return candidates
-
-
-def _to_float(value: object, field: str) -> float:
-    if value is None or value == "":
-        raise WorkflowError(f"字段 {field} 存在空值，请人工确认后再生成报告。")
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise WorkflowError(f"字段 {field} 的值不是数字：{value!r}") from exc
+    report_generation_note = str(request.get("report_generation_note") or "").strip()
+    if report_generation_note:
+        normalized_request["report_generation_note"] = report_generation_note
+    return normalized_request
 
 
 def _format_significant(value: float, significant_digits: int) -> str:
@@ -514,3 +458,16 @@ def _make_run_id(experiment_id: str) -> str:
 def _write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _resolve_original_photo_path(request: dict) -> str | None:
+    original_photo_path = request.get("original_photo_path") or request.get("manual_report_photo_path")
+    if original_photo_path:
+        return str(original_photo_path)
+
+    source = request.get("source")
+    if isinstance(source, str):
+        suffix = Path(source).suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}:
+            return source
+    return None
