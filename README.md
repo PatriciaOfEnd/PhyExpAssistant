@@ -1,0 +1,164 @@
+# PhyExpAssistant Demo
+
+> [!WARNING]
+> 该项目全部由 LLM 生成 (vibe coding) ，可能存在包括但不限于架构混乱，逻辑不明，大量 bug 等，在人工介入修改前，不建议任何人审计此项目。为您带来的糟糕阅读体验，我们深感抱歉。开始审计此项目，代表着您已经充分认识到审计此项目可能带来的潜在风险，开发者对您可能出现的任何心脑血管疾病不负任何责任。
+
+
+PhyExpAssistant 是一款基于 LLM 的，支持交互式设置 LLM API Key 和 Model，读取实验数据，完成校验、计算、LLM 报告文字生成，并输出 `.docx` 报告和运行产物的软件，支持 CLI 交互和 UI 交互。
+
+## 当前能力
+
+- 支持实验：`exp_001` 单摆测重力加速度。
+- 支持输入：JSON、CSV、手动录入、手写图片 LLM OCR 草稿。
+- 支持计算：逐组 `g = 4π²L/T²`、平均值、标准误差、`T²-L` 线性拟合。
+- 支持不确定度：A 类不确定度、每个数据字段的 B 类不确定度、最终矢量合成不确定度。
+- 支持计算机绘图：当前单摆实验会生成 `T²-L` 拟合图并自动插入 Word 报告。
+- 支持公式渲染：报告中的核心公式使用 Word Office Math 结构输出，不再以 LaTeX 原文显示。
+- 支持输出：`data/outputs/<run_id>/report.docx`。
+- 支持追踪：每次运行生成 `input.normalized.json`、`compute.result.json`、`render.context.json`、`manifest.json`。
+
+## 快速运行
+
+无需安装依赖，直接运行：
+
+```bash
+python demo.py
+```
+
+Windows 也可以直接运行：
+
+```powershell
+py -3 demo.py
+```
+
+Linux 也可以直接运行：
+
+```bash
+python3 demo.py
+```
+
+启动图形界面：
+
+```bash
+python demo.py --ui
+```
+
+Windows / Linux 可分别使用：
+
+```powershell
+py -3 demo.py --ui
+```
+
+```bash
+python3 demo.py --ui
+```
+
+如果你想安装 UI 可选依赖：
+
+```bash
+pip install -e ".[ui]"
+```
+
+使用国内源安装 PySide6（Linux/macOS）：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -e ".[ui]"
+.venv/bin/python demo.py --ui
+```
+
+使用国内源安装 PySide6（Windows PowerShell）：
+
+```powershell
+py -3 -m venv .venv; .\.venv\Scripts\python.exe -m pip install -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -e ".[ui]"; .\.venv\Scripts\python.exe demo.py --ui
+```
+
+使用内置样例并跳过 LLM：
+
+```bash
+python demo.py --sample --no-llm
+```
+
+从 JSON 生成：
+
+```bash
+python demo.py --json data/samples/pendulum.json --no-llm
+```
+
+## LLM 设置
+
+进入交互界面后选择：
+
+```text
+1. 设置 API Key / Model
+```
+
+需要手动填写：
+
+- `Base URL`：OpenAI 兼容接口地址，例如 `https://api.openai.com/v1`。
+- `Model`：文本/视觉模型名，例如 `gpt-4o-mini` 或服务商提供的视觉模型。
+- `API Key`：模型服务密钥。
+
+设置保存在 `.phyexpassistant/settings.json`。
+
+在 UI 模式下，这些设置也可以直接在界面左侧卡片中填写并保存。
+
+如果你想把配置和输出放到别的位置，可以通过环境变量覆盖：
+
+- `PHYEXPASSISTANT_HOME`：设置配置目录。
+- `PHYEXPASSISTANT_OUTPUT_DIR`：设置输出目录。
+
+这两个环境变量在 Windows 和 Linux 上都支持。
+
+## 手写图片识别说明
+
+当前 demo 暂时用多模态 LLM 直接做 OCR，不接入专用 OCR 引擎。流程是：
+
+```text
+图片 -> LLM 识别为 JSON 草稿 -> 用户确认 -> schema/单位/范围校验 -> 计算 -> docx
+```
+
+注意：LLM OCR 结果不是最终真值。识别结果会先回显给用户确认，空值、非数字、行数不一致或超出合理范围都会阻止生成报告。
+
+## B 类不确定度
+
+每个数据字段都可以增加 `b_uncertainty` 属性，例如：
+
+```json
+"length": {
+  "unit": "m",
+  "values": [0.5, 0.6, 0.7],
+  "b_uncertainty": {
+    "enabled": true,
+    "division": 0.001,
+    "unit": "m",
+    "method": "half_division_uniform"
+  }
+}
+```
+
+UI 的“手动录入”页中，每个数据块都有“计算 B 类不确定度”复选框。勾选后会显示分度值输入框和公式选择框。当前支持：
+
+- `half_division_uniform`：`分度值 / (2√3)`，默认值。
+- `division_uniform`：`分度值 / √3`。
+
+程序会按所选公式估计该数据的 B 类标准不确定度，并通过单摆公式传播到最终 `g` 的合成不确定度中。
+
+如果某个字段没有启用 `b_uncertainty`，报告中不会单独列出该字段的 B 类不确定度；如果所有字段都没有启用 B 类不确定度，报告只保留 A 类不确定度，不输出 B 类表项，也不进行矢量合成说明。
+
+结果展示采用有效数字规则：不确定度默认保留 1 位有效数字，首位为 1 或 2 时保留 2 位；对应测量值会四舍五入到与不确定度一致的小数位。
+
+
+
+## 跨平台说明
+
+- 路径解析已兼容 Windows 和 Linux，不依赖当前工作目录。
+- 输入文件可以使用相对路径或绝对路径。
+- 中文控制台输出会尽量切换到 UTF-8，减少 Windows 下乱码问题。
+- 生成的 `.docx`、`manifest.json` 和中间文件都写在项目内或你指定的输出目录中。
+- `--ui` 在 Windows 和 Linux 上都可用；若未安装 `PySide6`，程序会提示你安装可选依赖。
+- UI 主界面已加入滚动区域，低分辨率或小窗口下可通过纵向/横向滚动访问全部控件。
+- UI 左侧设置栏拥有独立纵向滚动条，输入框和按钮保持固定尺寸，不随窗口高度压缩。
+- UI 会根据屏幕尺寸自动缩放字号、间距、控件尺寸，减少低分辨率下控件截断。
+- UI 右上角 `设置` 可切换白色、深色和多组淡色主题，也支持自定义背景色和前景色。
+- 日期选择器已替换为自定义扁平化控件，样式与主程序统一。

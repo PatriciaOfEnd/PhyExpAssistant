@@ -1,0 +1,29 @@
+{
+  "experiment_id": "exp_001",
+  "student": {
+    "name": "张三",
+    "student_id": "20250001",
+    "class_name": "物理实验一班",
+    "date": "2025-05-06"
+  },
+  "options": {
+    "include_thinking": true,
+    "include_raw_appendix": true
+  },
+  "data": {
+    "length": {
+      "unit": "m",
+      "values": [0.5, 0.6, 0.7, 0.8, 0.9],
+      "b_uncertainty": {
+        "enabled": false
+      }
+    },
+    "period": {
+      "unit": "s",
+      "values": [1.42, 1.55, 1.68, 1.79, 1.90],
+      "b_uncertainty": {
+        "enabled": false
+      }
+    }
+  }
+}
