@@ -6,6 +6,22 @@
 
 PhyExpAssistant 是一款基于 LLM 的，支持交互式设置 LLM API Key 和 Model，手动录入或手写识别实验数据，完成校验、计算、LLM 报告文字生成，并输出 `.docx` 报告和运行产物的软件，支持 CLI 交互和 UI 交互。
 
+## 获取源码
+
+如果你要先把仓库克隆到本地，可以直接使用 `git clone`：
+
+```bash
+git clone https://github.com/PatriciaOfEnd/PhyExpAssistant.git
+cd PhyExpAssistant
+```
+
+如果你已经配置了 SSH，也可以改用：
+
+```bash
+git clone git@github.com:PatriciaOfEnd/PhyExpAssistant.git
+cd PhyExpAssistant
+```
+
 ## 当前能力
 
 - 支持实验模板：`exp_001` 单摆测重力加速度、`exp_002` 单摆周期与摆长关系验证、`exp_003` 惠斯通电桥测电阻。

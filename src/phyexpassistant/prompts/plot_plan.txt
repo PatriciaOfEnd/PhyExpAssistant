@@ -42,3 +42,4 @@
 6. 不要编造数据；如果现有字段不足以画图，则 need_plot=false 并在 warnings 中说明。
 7. 最多返回 3 张图；图像应服务于实验数据处理或结果总结。
 8. 若用户 payload 中 plot_preferences.force_computer_plot=true，请尽量返回 need_plot=true，并生成 plot_preferences.forced_plot_count 张图；若数据不足，返回能安全生成的图并在 warnings 中说明不足原因。
+9. 如你感觉需要，或实验中有从类似斜率、截距等处直接读出的数据，请拟合函数图像。

@@ -9,6 +9,7 @@
 secrets.*
 settings.local.json
 AGENT.md
+项目可行性探索.md
 data/outputs/
 data/tmp/
 train/

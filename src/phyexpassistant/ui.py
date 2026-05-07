@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
 import json
+import random
 import sys
 
 from .llm_client import LLMClient, LLMError
@@ -551,7 +553,7 @@ def _set_windows_app_user_model_id() -> None:
 
 def launch_ui(argv: list[str] | None = None) -> int:
     try:
-        from PySide6.QtCore import QDate, QEvent, Qt, QUrl
+        from PySide6.QtCore import QObject, QDate, QEvent, QThread, QTimer, Qt, QUrl, Signal, Slot
         from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon
         from PySide6.QtWidgets import (
             QApplication,
@@ -617,16 +619,140 @@ def launch_ui(argv: list[str] | None = None) -> int:
             "QToolButton": QToolButton,
             "QVBoxLayout": QVBoxLayout,
             "QWidget": QWidget,
+            "QObject": QObject,
             "QDate": QDate,
             "QEvent": QEvent,
+            "QThread": QThread,
+            "QTimer": QTimer,
             "Qt": Qt,
             "QUrl": QUrl,
+            "Signal": Signal,
+            "Slot": Slot,
             "QColor": QColor,
             "QDesktopServices": QDesktopServices,
             "QFont": QFont,
             "QIcon": QIcon,
         }
     )
+
+    class AsyncTaskWorker(QObject):
+        finished = Signal(object)
+        failed = Signal(object)
+
+        def __init__(self, job: Callable[[], object]) -> None:
+            super().__init__()
+            self._job = job
+
+        @Slot()
+        def run(self) -> None:
+            try:
+                result = self._job()
+            except Exception as exc:  # pragma: no cover - forwarded to UI
+                self.failed.emit(exc)
+            else:
+                self.finished.emit(result)
+
+    class ProcessingIndicator(QWidget):
+        PROCESSING_WORDS = [
+            "正在证明哥德巴赫猜想的逆命题...",
+            "正在获得 flag ...",
+            "正在穿过血脑屏障...",
+            "正在对牛弹琴...",
+            "正在玩 Apex Legends ...",
+            "正在和大模型整夜交心...",
+            "正在加入幻觉...",
+            "正在引入注意力机制...",
+            "@grok, is this true?",
+            "少女祈祷中...",
+            "交战，搜索，搞定就撤！",
+            "正在泄露 Canary ...",
+            "正在编写 SQLi 语句...",
+            "正在手搓 Shellcode",
+            "正在去除 UPX 壳...",
+            "正在脱 VMProtect 壳...",
+            "正在进行 Hash 碰撞...",
+            "正在伪造 JSON Web Token...",
+            "{{ 7*7 }}",
+            "正在踏上命途...",
+            "正在发送/求放过...",
+            "正在泄露 fd 指针...",
+            "正在 Double Free 你的实验报告...",
+            "正在寻找最直接、最简洁、最不绕弯子的方法...",
+            "正在殴打 LaTeX 公式使其自动渲染...",
+            "正在除以 0 ...",
+            "starwalkingDivisionError",
+            "正在加入 Starfall Koi...",
+            "正在看 CopperKoi 的 Blog ...",
+            "正在看 LyCecilion 的 WriteUp ...",
+            "正在看 starwalking 的女装照片...",
+            "正在看 PatriciaOfEnd 的浏览记录...",
+        ]
+        SPINNER_FRAMES = ["◐", "◓", "◑", "◒"]
+
+        def __init__(self, scale: float, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._scale = scale
+            self._word_sequence = list(self.PROCESSING_WORDS)
+            self._word_index = 0
+            self._spinner_index = 0
+            self._tick_index = 0
+            self._timer = QTimer(self)
+            self._timer.setInterval(120)
+            self._timer.timeout.connect(self._advance)
+            self.setObjectName("processingIndicator")
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(_scaled(6, scale, minimum=4))
+
+            self.word_label = QLabel(self.PROCESSING_WORDS[0], self)
+            self.word_label.setObjectName("processingWordLabel")
+            self.word_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+            self.word_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.word_label.setMinimumWidth(_scaled(168, scale, minimum=132))
+
+            self.spinner_label = QLabel(self.SPINNER_FRAMES[0], self)
+            self.spinner_label.setObjectName("processingSpinnerLabel")
+            self.spinner_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.spinner_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.spinner_label.setMinimumWidth(_scaled(18, scale, minimum=16))
+
+            layout.addWidget(self.word_label, 0)
+            layout.addWidget(self.spinner_label, 0)
+            self.hide()
+
+        def start(self, initial_word: str | None = None) -> None:
+            self._shuffle_processing_words()
+            self._spinner_index = 0
+            self._tick_index = 0
+            self.word_label.setText(self._word_sequence[self._word_index])
+            self.spinner_label.setText(self.SPINNER_FRAMES[self._spinner_index])
+            self.show()
+            self._timer.start()
+
+        def stop(self) -> None:
+            self._timer.stop()
+            self.hide()
+
+        def _advance(self) -> None:
+            self._spinner_index = (self._spinner_index + 1) % len(self.SPINNER_FRAMES)
+            self.spinner_label.setText(self.SPINNER_FRAMES[self._spinner_index])
+            self._tick_index = (self._tick_index + 1) % 12
+            if self._tick_index == 0:
+                self._word_index += 1
+                if self._word_index >= len(self._word_sequence):
+                    self._shuffle_processing_words(previous_word=self.word_label.text())
+                self.word_label.setText(self._word_sequence[self._word_index])
+
+        def _shuffle_processing_words(self, *, previous_word: str | None = None) -> None:
+            self._word_sequence = list(self.PROCESSING_WORDS)
+            random.shuffle(self._word_sequence)
+            if previous_word and len(self._word_sequence) > 1 and self._word_sequence[0] == previous_word:
+                self._word_sequence.append(self._word_sequence.pop(0))
+            self._word_index = 0
 
     class FlatDatePicker(QWidget):
         def __init__(self, scale: float, parent: QWidget | None = None) -> None:
@@ -1014,7 +1140,12 @@ def launch_ui(argv: list[str] | None = None) -> int:
         def __init__(self) -> None:
             super().__init__()
             self.settings = load_settings()
-            self._busy_cursor_active = False
+            self._busy_active = False
+            self._active_task_thread: QThread | None = None
+            self._active_task_worker: AsyncTaskWorker | None = None
+            self._pending_task_success_callback: Callable[[object], None] | None = None
+            self._pending_task_result: object | None = None
+            self._pending_task_error: Exception | None = None
             app = QApplication.instance()
             self._ui_scale = self._compute_ui_scale(app)
             self._theme_palette = build_theme_palette(self.settings)
@@ -1085,7 +1216,8 @@ def launch_ui(argv: list[str] | None = None) -> int:
             self.theme_button.setObjectName("themeButton")
             self.theme_button.setText("设置")
             self.theme_button.clicked.connect(self._open_theme_dialog)
-            root_layout.addWidget(_build_header(self.theme_button, self._ui_scale))
+            self.processing_indicator = ProcessingIndicator(self._ui_scale)
+            root_layout.addWidget(_build_header(self.theme_button, self.processing_indicator, self._ui_scale))
 
             content_layout = QHBoxLayout()
             content_layout.setSpacing(self._s(14, minimum=8))
@@ -1100,6 +1232,7 @@ def launch_ui(argv: list[str] | None = None) -> int:
             left_scroll_area.setFixedWidth(self._s(360, minimum=320))
             left_scroll_area.setMinimumHeight(self._s(300, minimum=240))
             left_scroll_area.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+            self.left_scroll_area = left_scroll_area
 
             left_panel = QWidget()
             left_panel.setObjectName("leftPanelContent")
@@ -1199,6 +1332,7 @@ def launch_ui(argv: list[str] | None = None) -> int:
 
             self.tabs.addTab(self._build_manual_tab(), "手动录入")
             self.tabs.addTab(self._build_ocr_tab(), "手写识别")
+            self._busy_widgets = [self.theme_button, self.left_scroll_area, self.tabs]
 
             footer = QFrame()
             footer_layout = QHBoxLayout(footer)
@@ -1488,6 +1622,69 @@ def launch_ui(argv: list[str] | None = None) -> int:
             else:
                 QMessageBox.warning(self, "提示", f"报告不存在：{path}")
 
+        def _begin_background_task(
+            self,
+            task_message: str,
+            *,
+            processing_word: str,
+            job: Callable[[], object],
+            on_success: Callable[[object], None],
+        ) -> None:
+            if self._active_task_thread is not None:
+                raise RuntimeError("当前已有任务正在运行，请稍候。")
+
+            self._set_busy(True, task_message, processing_word=processing_word)
+            thread = QThread(self)
+            worker = AsyncTaskWorker(job)
+            worker.moveToThread(thread)
+
+            self._pending_task_success_callback = on_success
+
+            worker.finished.connect(self._queue_background_task_success)
+            worker.failed.connect(self._queue_background_task_failure)
+            worker.finished.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            thread.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            thread.started.connect(worker.run)
+
+            self._active_task_thread = thread
+            self._active_task_worker = worker
+            thread.start()
+
+        def _clear_background_task(self) -> None:
+            self._active_task_thread = None
+            self._active_task_worker = None
+            self._pending_task_success_callback = None
+            self._pending_task_result = None
+            self._pending_task_error = None
+            self._set_busy(False, "")
+
+        def _queue_background_task_success(self, result: object) -> None:
+            self._pending_task_result = result
+            QTimer.singleShot(0, self, self._process_background_task_success)
+
+        def _queue_background_task_failure(self, exc: object) -> None:
+            self._pending_task_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+            QTimer.singleShot(0, self, self._process_background_task_failure)
+
+        @Slot()
+        def _process_background_task_success(self) -> None:
+            callback = self._pending_task_success_callback
+            result = self._pending_task_result
+            try:
+                self._clear_background_task()
+                if callback is not None:
+                    callback(result)
+            except Exception as exc:  # pragma: no cover - forwarded to UI
+                self._show_error(exc)
+
+        @Slot()
+        def _process_background_task_failure(self) -> None:
+            exc = self._pending_task_error or RuntimeError("后台任务失败。")
+            self._clear_background_task()
+            self._show_error(exc)
+
         def _generate_from_manual(self) -> None:
             try:
                 data = {}
@@ -1526,17 +1723,28 @@ def launch_ui(argv: list[str] | None = None) -> int:
                 if not image_path.is_file():
                     raise ValueError(f"手写图片不存在或不是文件：{image_path}")
                 note = self.ocr_note_input.toPlainText().strip() if hasattr(self, "ocr_note_input") else ""
-                self._set_busy(True, "正在识别手写图片...")
-                request = LLMClient(settings).extract_handwritten_data(image_path, self._selected_experiment_id(), note=note)
-                self._apply_selected_experiment(request)
-                request.setdefault("source", str(image_path))
-                self._render_ocr_result(request)
-                self.ocr_preview.setPlainText(json.dumps(request, ensure_ascii=False, indent=2))
-                self._set_status("OCR 识别完成，请检查并修正结构化草稿。")
+                experiment_id = self._selected_experiment_id()
+
+                def job() -> dict:
+                    return LLMClient(settings).extract_handwritten_data(image_path, experiment_id, note=note)
+
+                def handle_success(request: object) -> None:
+                    if not isinstance(request, dict):
+                        raise TypeError(f"OCR 返回结果格式不正确：{type(request)!r}")
+                    self._apply_selected_experiment(request)
+                    request.setdefault("source", str(image_path))
+                    self._render_ocr_result(request)
+                    self.ocr_preview.setPlainText(json.dumps(request, ensure_ascii=False, indent=2))
+                    self._set_status("OCR 识别完成，请检查并修正结构化草稿。")
+
+                self._begin_background_task(
+                    "正在识别手写图片...",
+                    processing_word="Thinking",
+                    job=job,
+                    on_success=handle_success,
+                )
             except Exception as exc:
                 self._show_error(exc)
-            finally:
-                self._set_busy(False, "")
 
         def _generate_from_ocr_preview(self) -> None:
             try:
@@ -1589,18 +1797,25 @@ def launch_ui(argv: list[str] | None = None) -> int:
             settings = self._collect_settings()
             save_settings(settings)
             use_llm = self.use_llm_checkbox.isChecked()
-            self._set_busy(True, "正在生成报告...")
-            try:
-                result = generate_report(request, settings, use_llm=use_llm)
+
+            def job() -> dict:
+                return generate_report(request, settings, use_llm=use_llm)
+
+            def handle_success(result: object) -> None:
+                if not isinstance(result, dict):
+                    raise TypeError(f"报告生成结果格式不正确：{type(result)!r}")
                 self._latest_report_path = result["report_path"]
                 self.report_path_label.setText(f"最近报告：{result['report_path']}")
                 warning_text = "；".join(result["warnings"]) if result["warnings"] else "无"
                 self._set_status(f"生成完成：{result['run_id']} | 警告：{warning_text}")
                 QMessageBox.information(self, "生成完成", f"报告已生成：\n{result['report_path']}")
-            except Exception as exc:
-                self._show_error(exc)
-            finally:
-                self._set_busy(False, "")
+
+            self._begin_background_task(
+                "正在生成报告...",
+                processing_word="Cooking",
+                job=job,
+                on_success=handle_success,
+            )
 
         def _current_student(self) -> dict:
             return {
@@ -1816,13 +2031,25 @@ def launch_ui(argv: list[str] | None = None) -> int:
         def _set_status(self, text: str) -> None:
             self.status_label.setText(text)
 
-        def _set_busy(self, busy: bool, message: str) -> None:
-            if busy and not self._busy_cursor_active:
-                QApplication.setOverrideCursor(Qt.WaitCursor)
-                self._busy_cursor_active = True
-            elif not busy and self._busy_cursor_active:
-                QApplication.restoreOverrideCursor()
-                self._busy_cursor_active = False
+        def _set_busy(self, busy: bool, message: str, *, processing_word: str | None = None) -> None:
+            if busy == self._busy_active:
+                if busy and hasattr(self, "processing_indicator") and not self.processing_indicator.isVisible():
+                    self.processing_indicator.start(processing_word)
+                if message:
+                    self._set_status(message)
+                return
+
+            self._busy_active = busy
+
+            for widget in getattr(self, "_busy_widgets", []):
+                widget.setEnabled(not busy)
+
+            if hasattr(self, "processing_indicator"):
+                if busy:
+                    self.processing_indicator.start(processing_word)
+                else:
+                    self.processing_indicator.stop()
+
             if message:
                 self._set_status(message)
 
@@ -1838,7 +2065,7 @@ def launch_ui(argv: list[str] | None = None) -> int:
     return app.exec()
 
 
-def _build_header(settings_button: object, scale: float):
+def _build_header(settings_button: object, processing_indicator: object, scale: float):
     from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
 
     frame = QFrame()
@@ -1858,6 +2085,7 @@ def _build_header(settings_button: object, scale: float):
     title_box.addWidget(title)
     title_box.addWidget(subtitle)
     top_row.addLayout(title_box, 1)
+    top_row.addWidget(processing_indicator, 0)
     top_row.addWidget(settings_button, 0)
     layout.addLayout(top_row)
     return frame
