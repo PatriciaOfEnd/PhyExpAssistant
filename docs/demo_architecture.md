@@ -9,8 +9,8 @@ CLI 交互
   -> 设置 API Key / Model
   -> 读取 JSON、CSV、手动输入或 LLM OCR 图片
   -> 标准化单位和字段
-  -> 单摆实验计算
-  -> LLM 生成报告文字，不改数值
+  -> LLM 生成报告文字与绘图计划
+  -> 本地仅做安全绘图与文档渲染
   -> 构造 RenderContext
   -> 输出 report.docx 和 manifest.json
 ```
@@ -21,14 +21,14 @@ CLI 交互
 - `src/phyexpassistant/ui.py`：PySide6 扁平化桌面 UI。
 - `src/phyexpassistant/settings.py`：本地 LLM 设置读写。
 - `src/phyexpassistant/llm_client.py`：OpenAI 兼容 Chat Completions 调用，包含图片 OCR demo。
-- `src/phyexpassistant/workflow.py`：输入校验、单位标准化、计算、产物写入。
+- `src/phyexpassistant/workflow.py`：输入标准化、LLM 报告编排、安全绘图调度、产物写入。
 - `src/phyexpassistant/docx_writer.py`：无第三方依赖的最小 `.docx` 生成器。
 - `src/phyexpassistant/experiments.py`：demo 题库注册。
 
 ## 边界
 
-- LLM 可以识别图片和生成文字，但不能覆盖计算结果。
-- 计算只使用标准化后的数据。
+- LLM 负责实验专属报告内容和绘图计划，但本地不执行 LLM 返回的代码。
+- 计算机绘图只接受 `need_plot` / `safe_spec`，并由本地白名单绘图器生成图片。
 - 每次运行都生成独立 `run_id` 目录。
 - API Key 只保存在本地忽略目录，不写入 `manifest.json`。
 
@@ -45,4 +45,4 @@ CLI 交互
 - UI 根据屏幕可用尺寸计算缩放系数，用于窗口尺寸、字体、间距、按钮和滚动条。
 - UI 主题由本地设置持久化，预置白色、深色、薄荷、薰衣草、暖杏，并支持自定义背景色与前景色。
 - 日期选择器使用自定义 `FlatDatePicker`，不依赖系统原生日期控件样式。
-- 数据字段支持 `b_uncertainty` 属性。启用后以仪器分度值计算 B 类标准不确定度，可在 `分度值/(2√3)` 与 `分度值/√3` 间切换，并通过灵敏度系数传播到最终结果。
+- 数据字段支持 `b_uncertainty` 属性。启用后记录仪器分度值和计算公式，可在 `分度值/(2√3)` 与 `分度值/√3` 间切换，并交由报告生成流程按模板处理。

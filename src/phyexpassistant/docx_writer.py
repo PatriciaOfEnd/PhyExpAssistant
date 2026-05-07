@@ -30,50 +30,13 @@ def _document_xml(context: dict, figures: list[dict]) -> str:
     body_parts: list[str] = []
     body_parts.append(_paragraph(context["experiment_name"], style="Title", align="center"))
     body_parts.append(_paragraph(_student_line(context), style="StudentLine", align="center"))
-
-    if _section_enabled(context, "basic_info"):
-        body_parts.append(_section_heading("一、实验基本信息"))
-        body_parts.append(_info_table(context))
-
-    if _section_enabled(context, "raw_data"):
-        body_parts.append(_section_heading("二、实验数据记录"))
-        body_parts.append(_table(context["raw_headers"], context["raw_rows"]))
-
-    if _section_enabled(context, "data_processing"):
-        body_parts.append(_section_heading("三、实验数据处理"))
-        body_parts.append(_sub_heading("1. 计算公式"))
-        body_parts.extend(_formula_paragraphs(context))
-        body_parts.append(_sub_heading("2. 计算结果"))
-        body_parts.append(_table(context["calc_headers"], context["calc_rows"]))
-        body_parts.append(_paragraph(f"平均法结果：{context['g_mean']}"))
-        body_parts.append(_paragraph(f"线性拟合结果：{context['g_fit']}"))
-        body_parts.append(_paragraph(f"拟合截距：{context['fit_intercept']}"))
-        body_parts.append(_paragraph(f"拟合 R²：{context['fit_r2']}"))
-        if figures and _section_enabled(context, "computer_plot"):
-            body_parts.append(_sub_heading("3. 计算机绘图"))
-            for figure in figures:
-                body_parts.append(_image_paragraph(figure))
-                body_parts.append(_paragraph(f"图 {figure['index']}  {figure.get('caption', '计算机绘图')}", style="Caption", align="center"))
-                if figure.get("description"):
-                    body_parts.append(_paragraph(figure["description"]))
-
-    if _section_enabled(context, "uncertainty"):
-        body_parts.append(_section_heading("四、不确定度分析"))
-        body_parts.append(_table(["来源", "不确定度", "说明"], context["uncertainty_rows"]))
-        body_parts.append(_paragraph(context["uncertainty_summary"]))
-        body_parts.append(_paragraph(f"最终结果：{context['final_result']}", bold=True))
-
-    if _section_enabled(context, "result_summary"):
-        body_parts.append(_section_heading("五、实验结果分析"))
-        body_parts.append(_paragraph(context["result_summary"]))
-        body_parts.append(_paragraph(context["error_analysis"]))
-
-    if context.get("thinking_answer") and _section_enabled(context, "thinking"):
-        body_parts.append(_section_heading("六、课后思考题"))
-        body_parts.append(_paragraph(context["thinking_answer"]))
-
+    body_parts.extend(_generic_report_body_parts(context, figures))
     body_parts.append(_section_properties())
     body = "".join(body_parts)
+    return _document_package_xml(body)
+
+
+def _document_package_xml(body: str) -> str:
     return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document
   xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -84,6 +47,58 @@ def _document_xml(context: dict, figures: list[dict]) -> str:
   xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
   <w:body>{body}</w:body>
 </w:document>'''
+
+
+def _generic_report_body_parts(context: dict, figures: list[dict]) -> list[str]:
+    body_parts: list[str] = []
+
+    if _section_enabled(context, "basic_info"):
+        body_parts.append(_section_heading("一、实验基本信息"))
+        body_parts.append(_info_table(context))
+        if context.get("experiment_description"):
+            body_parts.append(_paragraph(f"实验说明：{context['experiment_description']}"))
+
+    if _section_enabled(context, "raw_data"):
+        body_parts.append(_section_heading("二、实验数据记录"))
+        body_parts.append(_table(context["raw_headers"], context["raw_rows"]))
+
+    if _section_enabled(context, "data_processing"):
+        body_parts.append(_section_heading("三、实验数据处理"))
+        body_parts.append(_sub_heading("1. 实验原理与处理方法"))
+        for formula in context.get("generic_formula_lines") or []:
+            body_parts.append(_paragraph(formula, style="Formula", align="center"))
+        if context.get("generic_processing_summary"):
+            body_parts.append(_paragraph(context["generic_processing_summary"]))
+        result_rows = context.get("generic_result_rows") or []
+        if result_rows:
+            body_parts.append(_sub_heading("2. 数据处理结果"))
+            body_parts.append(_table(context.get("generic_result_headers") or ["项目", "内容"], result_rows))
+        if figures and _section_enabled(context, "computer_plot"):
+            body_parts.append(_sub_heading("3. 计算机绘图"))
+            for figure in figures:
+                body_parts.append(_image_paragraph(figure))
+                body_parts.append(_paragraph(f"图 {figure['index']}  {figure.get('caption', '计算机绘图')}", style="Caption", align="center"))
+                if figure.get("description"):
+                    body_parts.append(_paragraph(figure["description"]))
+
+    if _section_enabled(context, "uncertainty") and context.get("uncertainty_summary"):
+        body_parts.append(_section_heading("四、不确定度分析"))
+        body_parts.append(_paragraph(context["uncertainty_summary"]))
+        if context.get("final_result"):
+            body_parts.append(_paragraph(f"最终结果：{context['final_result']}", bold=True))
+
+    if _section_enabled(context, "result_summary"):
+        body_parts.append(_section_heading("五、实验结果分析"))
+        if context.get("result_summary"):
+            body_parts.append(_paragraph(context["result_summary"]))
+        if context.get("error_analysis"):
+            body_parts.append(_paragraph(context["error_analysis"]))
+
+    if context.get("thinking_answer") and _section_enabled(context, "thinking"):
+        body_parts.append(_section_heading("六、课后思考题"))
+        body_parts.append(_paragraph(context["thinking_answer"]))
+
+    return body_parts
 
 
 def _student_line(context: dict) -> str:
@@ -232,67 +247,6 @@ def _table_cell(value: object, *, header: bool = False) -> str:
         f'<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr>{bold}</w:rPr>'
         f'<w:t xml:space="preserve">{safe}</w:t></w:r></w:p></w:tc>'
     )
-
-
-def _formula_paragraphs(context: dict) -> list[str]:
-    formulas = [
-        _math_paragraph(_m_text("T = "), _m_frac(_m_text("t"), _m_text("N"))),
-        _math_paragraph(_m_text("g = "), _m_frac(_m_join(_m_text("4"), _m_sup(_m_text("π"), _m_text("2")), _m_text("L")), _m_sup(_m_text("T"), _m_text("2")))),
-        _math_paragraph(_m_text("u_A = "), _m_frac(_m_text("s_g"), _m_rad(_m_text("n")))),
-    ]
-    enabled_b_fields = context.get("enabled_b_uncertainty_fields") or []
-    if enabled_b_fields:
-        method_labels = {field.get("method_label", "") for field in enabled_b_fields}
-        if any("2√3" in label for label in method_labels):
-            formulas.append(_formula_ub_half_division())
-        if any(label and "2√3" not in label for label in method_labels):
-            formulas.append(_formula_ub_division())
-        uc_parts = [_m_sup(_m_text("u_A"), _m_text("2"))]
-        for field in enabled_b_fields:
-            uc_parts.append(_m_text(" + "))
-            uc_parts.append(_m_sup(_m_text(field["symbol"]), _m_text("2")))
-        formulas.append(_math_paragraph(_m_text("u_c = "), _m_rad(_m_join(*uc_parts))))
-    return formulas
-
-
-def _formula_ub_half_division() -> str:
-    return _math_paragraph(_m_text("u_B = "), _m_frac(_m_text("Δ"), _m_join(_m_text("2"), _m_rad(_m_text("3")))))
-
-
-def _formula_ub_division() -> str:
-    return _math_paragraph(_m_text("u_B = "), _m_frac(_m_text("Δ"), _m_rad(_m_text("3"))))
-
-
-def _math_paragraph(*math_parts: str) -> str:
-    return (
-        '<w:p><w:pPr><w:pStyle w:val="Formula"/><w:jc w:val="center"/></w:pPr>'
-        f'<m:oMathPara><m:oMathParaPr><m:jc m:val="centerGroup"/></m:oMathParaPr><m:oMath>{"".join(math_parts)}</m:oMath></m:oMathPara>'
-        '</w:p>'
-    )
-
-
-def _m_text(text: str) -> str:
-    return (
-        '<m:r><m:rPr><m:sty m:val="p"/></m:rPr>'
-        '<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math" w:hint="eastAsia"/></w:rPr>'
-        f'<m:t xml:space="preserve">{escape(text)}</m:t></m:r>'
-    )
-
-
-def _m_join(*parts: str) -> str:
-    return "".join(parts)
-
-
-def _m_frac(num: str, den: str) -> str:
-    return f'<m:f><m:fPr><m:type m:val="bar"/></m:fPr><m:num>{num}</m:num><m:den>{den}</m:den></m:f>'
-
-
-def _m_sup(base: str, sup: str) -> str:
-    return f'<m:sSup><m:e>{base}</m:e><m:sup>{sup}</m:sup></m:sSup>'
-
-
-def _m_rad(content: str) -> str:
-    return f'<m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:e>{content}</m:e></m:rad>'
 
 
 def _image_paragraph(figure: dict) -> str:

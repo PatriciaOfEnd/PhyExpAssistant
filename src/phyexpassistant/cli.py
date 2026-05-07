@@ -7,7 +7,7 @@ import json
 import os
 import sys
 
-from .experiments import list_experiments
+from .experiments import get_experiment, get_experiment_by_name, list_experiments
 from .llm_client import LLMClient, LLMError
 from .paths import project_path, resolve_input_path
 from .settings import Settings, load_settings, save_settings
@@ -17,7 +17,6 @@ from .workflow import (
     generate_report,
     load_request_csv,
     load_request_json,
-    manual_request,
 )
 
 
@@ -50,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sample", action="store_true", help="使用内置样例数据生成报告")
     parser.add_argument("--json", type=Path, help="从 JSON 输入生成报告")
     parser.add_argument("--csv", type=Path, help="从 CSV 输入生成报告")
+    parser.add_argument("--experiment", help="实验名称或后台实验 ID；省略时默认使用第一个实验")
     parser.add_argument("--no-llm", action="store_true", help="不调用 LLM，使用本地模板文字")
     args = parser.parse_args(argv)
 
@@ -59,15 +59,18 @@ def main(argv: list[str] | None = None) -> int:
         return launch_ui(argv or sys.argv[:1])
 
     settings = load_settings()
+    experiment_id = _resolve_experiment_selector(args.experiment) if args.experiment else _default_experiment_id()
     if args.sample:
         request = load_request_json(project_path("data", "samples", "pendulum.json"))
+        _apply_experiment(request, experiment_id)
         return _run_request(request, settings, use_llm=not args.no_llm)
     if args.json:
         request = load_request_json(args.json)
+        _apply_experiment(request, experiment_id)
         return _run_request(request, settings, use_llm=not args.no_llm)
     if args.csv:
         print("CSV 模式需要补充学生信息。")
-        request = load_request_csv(args.csv, _prompt_student(), _prompt_options())
+        request = load_request_csv(args.csv, _prompt_student(), _prompt_options(), experiment_id=experiment_id)
         return _run_request(request, settings, use_llm=not args.no_llm)
 
     return _interactive_loop(settings)
@@ -93,18 +96,21 @@ def _interactive_loop(settings: Settings) -> int:
             if choice == "1":
                 settings = _settings_screen(settings)
             elif choice == "2":
+                experiment_id = _prompt_experiment_id()
                 path = _prompt_path("JSON 文件路径：")
                 request = load_request_json(path)
+                _apply_experiment(request, experiment_id)
                 _run_request(request, settings)
             elif choice == "3":
+                experiment_id = _prompt_experiment_id()
                 path = _prompt_path("CSV 文件路径：")
-                request = load_request_csv(path, _prompt_student(), _prompt_options())
+                request = load_request_csv(path, _prompt_student(), _prompt_options(), experiment_id=experiment_id)
                 _run_request(request, settings)
             elif choice == "4":
-                request = _manual_input_request()
+                request = _manual_input_request(_prompt_experiment_id())
                 _run_request(request, settings)
             elif choice == "5":
-                request = _ocr_input_request(settings)
+                request = _ocr_input_request(settings, _prompt_experiment_id())
                 if request:
                     _run_request(request, settings)
             elif choice == "6":
@@ -157,35 +163,41 @@ def _prompt_options() -> dict:
     }
 
 
-def _manual_input_request() -> dict:
+def _manual_input_request(experiment_id: str) -> dict:
     student = _prompt_student()
     options = _prompt_options()
-    print("\n--- 单摆实验数据 ---")
-    length_unit = input("摆长单位 m/cm/mm [m]：").strip() or "m"
-    length_values = _parse_number_list(input("摆长列表，用逗号分隔："))
-    length_uncertainty = _prompt_b_uncertainty("摆长", length_unit)
-    period_unit = input("周期单位 s/ms [s]：").strip() or "s"
-    period_values = _parse_number_list(input("周期列表，用逗号分隔："))
-    period_uncertainty = _prompt_b_uncertainty("周期", period_unit)
-    return manual_request(
-        student,
-        length_values,
-        length_unit,
-        period_values,
-        period_unit,
-        options,
-        length_uncertainty=length_uncertainty,
-        period_uncertainty=period_uncertainty,
-    )
+    experiment = get_experiment(experiment_id)
+    print(f"\n--- {experiment['name']}实验数据 ---")
+    data = {}
+    for field_name, spec in (experiment.get("fields") or {}).items():
+        label = spec.get("label") or field_name
+        accepted_units = spec.get("accepted_units") or [spec.get("base_unit") or ""]
+        default_unit = spec.get("base_unit") or accepted_units[0]
+        units_text = "/".join(accepted_units)
+        unit = input(f"{label}单位 {units_text} [{default_unit}]：").strip() or default_unit
+        values = _parse_number_list(input(f"{label}列表，用逗号分隔："))
+        field_data = {"unit": unit, "values": values}
+        uncertainty = _prompt_b_uncertainty(label, unit)
+        if uncertainty:
+            field_data["b_uncertainty"] = uncertainty
+        data[field_name] = field_data
+    return {
+        "experiment_id": experiment_id,
+        "student": student,
+        "options": options,
+        "data": data,
+        "source": "manual",
+    }
 
 
-def _ocr_input_request(settings: Settings) -> dict | None:
+def _ocr_input_request(settings: Settings, experiment_id: str) -> dict | None:
     if not settings.is_llm_ready:
         print("请先进入菜单 1 设置 API Key、Base URL 和 Model。")
         return None
     image_path = _prompt_path("手写数据图片路径：")
     print("正在调用 LLM 识别手写数据，请稍候...")
-    request = LLMClient(settings).extract_handwritten_data(image_path, "exp_001")
+    request = LLMClient(settings).extract_handwritten_data(image_path, experiment_id)
+    _apply_experiment(request, experiment_id)
     request.setdefault("source", str(image_path))
     print("\n--- 识别结果草稿 ---")
     print(json.dumps(request, ensure_ascii=False, indent=2))
@@ -214,8 +226,39 @@ def _run_request(request: dict, settings: Settings, *, use_llm: bool = True) -> 
 
 def _print_experiments() -> None:
     print("\n当前 demo 支持：")
-    for experiment in list_experiments():
-        print(f"- {experiment['id']}：{experiment['name']}（{experiment['description']}）")
+    for index, experiment in enumerate(list_experiments(), start=1):
+        print(f"{index}. {experiment['name']}（{experiment['description']}）")
+
+
+def _default_experiment_id() -> str:
+    return list_experiments()[0]["id"]
+
+
+def _resolve_experiment_selector(selector: str) -> str:
+    selector = selector.strip()
+    try:
+        return get_experiment(selector)["id"]
+    except ValueError:
+        return get_experiment_by_name(selector)["id"]
+
+
+def _prompt_experiment_id() -> str:
+    experiments = list_experiments()
+    print("\n--- 选择实验 ---")
+    for index, experiment in enumerate(experiments, start=1):
+        print(f"{index}. {experiment['name']}")
+    choice = input("请选择实验 [1]：").strip()
+    if not choice:
+        return experiments[0]["id"]
+    selected_index = int(choice)
+    if selected_index < 1 or selected_index > len(experiments):
+        raise ValueError("实验序号超出范围。")
+    return experiments[selected_index - 1]["id"]
+
+
+def _apply_experiment(request: dict, experiment_id: str) -> dict:
+    request["experiment_id"] = experiment_id
+    return request
 
 
 def _parse_number_list(text: str) -> list[float]:

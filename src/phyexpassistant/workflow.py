@@ -2,29 +2,19 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from statistics import mean, stdev
 import csv
 import json
-import math
 import uuid
 
 from .docx_writer import write_docx
 from .experiments import get_experiment
 from .llm_client import LLMClient, LLMError
 from .paths import output_root, resolve_input_path
-from .plotting import write_pendulum_fit_plot
+from .plotting import write_safe_plot
 from .settings import Settings
 
 
 OUTPUT_ROOT = output_root()
-
-UNIT_FACTORS = {
-    "m": 1.0,
-    "cm": 0.01,
-    "mm": 0.001,
-    "s": 1.0,
-    "ms": 0.001,
-}
 
 B_UNCERTAINTY_METHODS = {
     "half_division_uniform": {
@@ -59,44 +49,16 @@ def load_request_csv(path: Path, student: dict, options: dict | None = None, exp
     if not rows:
         raise WorkflowError("CSV 文件没有数据行。")
 
-    length_values, length_unit = _read_csv_series(rows, ["length_m", "length_cm", "length_mm", "length"])
-    period_values, period_unit = _read_csv_series(rows, ["period_s", "period_ms", "period"])
+    experiment = get_experiment(experiment_id)
+    data = _read_csv_generic_data(rows, experiment)
+
     request = {
         "experiment_id": experiment_id,
         "student": student,
         "options": options or {},
-        "data": {
-            "length": {"unit": length_unit, "values": length_values},
-            "period": {"unit": period_unit, "values": period_values},
-        },
+        "data": data,
     }
     return _with_defaults(request, source=str(path))
-
-
-def manual_request(
-    student: dict,
-    length_values: list[float],
-    length_unit: str,
-    period_values: list[float],
-    period_unit: str,
-    options: dict | None = None,
-    length_uncertainty: dict | None = None,
-    period_uncertainty: dict | None = None,
-) -> dict:
-    request = {
-        "experiment_id": "exp_001",
-        "student": student,
-        "options": options or {},
-        "data": {
-            "length": {"unit": length_unit, "values": length_values},
-            "period": {"unit": period_unit, "values": period_values},
-        },
-    }
-    if length_uncertainty:
-        request["data"]["length"]["b_uncertainty"] = length_uncertainty
-    if period_uncertainty:
-        request["data"]["period"]["b_uncertainty"] = period_uncertainty
-    return _with_defaults(request, source="manual")
 
 
 def generate_report(request: dict, settings: Settings, *, use_llm: bool = True) -> dict:
@@ -108,34 +70,45 @@ def generate_report(request: dict, settings: Settings, *, use_llm: bool = True) 
 
     warnings: list[str] = []
     _write_json(run_dir / "input.request.json", request)
-
-    normalized = normalize_request(request, experiment)
+    normalized = normalize_generic_request(request, experiment)
     _write_json(run_dir / "input.normalized.json", normalized)
+    report_content = build_generic_local_narrative(normalized)
+    plot_plan = {"need_plot": False, "reason": "LLM 未生成绘图计划。", "safe_spec": {"plots": []}, "warnings": []}
+    llm = None
 
-    compute_result = compute_pendulum(normalized)
-    figure = write_pendulum_fit_plot(
-        run_dir / "figures" / "pendulum_fit.png",
-        normalized["data"]["length_m"],
-        normalized["data"]["period_s"],
-        compute_result["fit"].get("slope") or 0.0,
-        compute_result["fit"].get("intercept") or 0.0,
-        compute_result["fit"].get("r2"),
-    )
-    compute_result["figures"] = [figure]
-    _write_json(run_dir / "compute.result.json", compute_result)
-
-    narrative = build_local_narrative(normalized, compute_result)
     if use_llm and settings.is_llm_ready:
         try:
-            llm_narrative = LLMClient(settings).generate_narrative(normalized, compute_result)
-            narrative.update(_sanitize_narrative(llm_narrative, narrative, compute_result))
+            llm = LLMClient(settings)
+            llm_report_content = llm.generate_report_content(normalized, experiment)
+            report_content = _sanitize_generic_narrative(llm_report_content, report_content, normalized)
         except LLMError as exc:
-            warnings.append(f"LLM 文案生成失败，已使用本地模板：{exc}")
+            warnings.append(f"LLM 报告内容生成失败，已使用本地通用模板：{exc}")
+        if llm is not None:
+            try:
+                llm_plot_plan = llm.plan_plots(normalized, experiment, report_content)
+                plot_plan = _sanitize_plot_plan(llm_plot_plan)
+                warnings.extend(plot_plan.get("warnings") or [])
+            except LLMError as exc:
+                warnings.append(f"LLM 绘图计划生成失败，已跳过计算机绘图：{exc}")
     elif use_llm:
-        warnings.append("LLM 未配置，已使用本地模板生成报告文字。")
-    _write_json(run_dir / "narrative.result.json", narrative)
+        warnings.append("LLM 未配置，已使用本地通用模板生成报告文字。")
 
-    render_context = build_render_context(normalized, compute_result, narrative)
+    if normalized.get("options", {}).get("force_computer_plot") and not use_llm:
+        warnings.append("已启用强制绘图，但当前关闭了 LLM，无法生成绘图计划。")
+    if normalized.get("options", {}).get("force_computer_plot") and use_llm and not plot_plan.get("need_plot"):
+        warnings.append("已启用强制绘图，但模型未生成可用绘图计划。")
+
+    figures = _render_safe_plots(run_dir, normalized, plot_plan, warnings)
+    analysis_result = {
+        "report_content": report_content,
+        "plot_plan": plot_plan,
+        "figures": figures,
+    }
+    _write_json(run_dir / "compute.result.json", analysis_result)
+    _write_json(run_dir / "narrative.result.json", report_content)
+    _write_json(run_dir / "plot.plan.json", plot_plan)
+
+    render_context = build_generic_render_context(normalized, report_content, figures, plot_plan)
     validate_render_context(render_context, experiment["render_contract"])
     _write_json(run_dir / "render.context.json", render_context)
 
@@ -155,9 +128,10 @@ def generate_report(request: dict, settings: Settings, *, use_llm: bool = True) 
             "normalized_input": str(run_dir / "input.normalized.json"),
             "compute_result": str(run_dir / "compute.result.json"),
             "narrative_result": str(run_dir / "narrative.result.json"),
+            "plot_plan": str(run_dir / "plot.plan.json"),
             "render_context": str(run_dir / "render.context.json"),
             "report": str(report_path),
-            "figures": [figure["path"]],
+            "figures": [figure["path"] for figure in figures],
         },
         "warnings": warnings,
     }
@@ -165,171 +139,99 @@ def generate_report(request: dict, settings: Settings, *, use_llm: bool = True) 
     return {"run_id": run_id, "run_dir": str(run_dir), "report_path": str(report_path), "warnings": warnings}
 
 
-def normalize_request(request: dict, experiment: dict) -> dict:
+def normalize_generic_request(request: dict, experiment: dict) -> dict:
     data = request.get("data") or {}
-    length_m = _extract_series(data, "length", aliases=["length_m", "length_cm", "length_mm", "length_values"])
-    period_s = _extract_series(data, "period", aliases=["period_s", "period_ms", "period_s_list", "period_values"])
-    length_uncertainty = _normalize_b_uncertainty(data, "length", "m")
-    period_uncertainty = _normalize_b_uncertainty(data, "period", "s")
+    fields = experiment.get("fields") or {}
+    normalized_fields = []
+    normalized_data = {}
+    row_count = 0
 
-    if len(length_m) != len(period_s):
-        raise WorkflowError(f"摆长数据行数 {len(length_m)} 与周期数据行数 {len(period_s)} 不一致。")
-    if len(length_m) < 2:
-        raise WorkflowError("至少需要 2 组数据才能生成 demo 报告。")
+    for field_name, spec in fields.items():
+        field_data = data.get(field_name, {})
+        if isinstance(field_data, dict):
+            unit = field_data.get("unit") or spec.get("base_unit") or ""
+            values = field_data.get("values") or []
+            b_uncertainty = field_data.get("b_uncertainty") or {"enabled": False}
+        elif isinstance(field_data, list):
+            unit = spec.get("base_unit") or ""
+            values = field_data
+            b_uncertainty = {"enabled": False}
+        elif field_data not in (None, ""):
+            unit = spec.get("base_unit") or ""
+            values = [field_data]
+            b_uncertainty = {"enabled": False}
+        else:
+            unit = spec.get("base_unit") or ""
+            values = []
+            b_uncertainty = {"enabled": False}
 
-    fields = experiment["fields"]
-    rows = []
-    for index, (length, period) in enumerate(zip(length_m, period_s), start=1):
-        _check_range("length", length, fields["length"], index)
-        _check_range("period", period, fields["period"], index)
-        rows.append({"index": index, "length_m": length, "period_s": period})
+        clean_values = [None if value in (None, "") else value for value in values]
+        row_count = max(row_count, len(clean_values))
+        normalized_field = {
+            "field": field_name,
+            "label": spec.get("label") or field_name,
+            "unit": unit,
+            "base_unit": spec.get("base_unit") or unit,
+            "accepted_units": spec.get("accepted_units") or [],
+            "values": clean_values,
+            "b_uncertainty": b_uncertainty,
+        }
+        normalized_fields.append(normalized_field)
+        normalized_data[field_name] = normalized_field
+
+    raw_headers = ["序号"] + [_generic_header(field) for field in normalized_fields]
+    raw_rows = []
+    for row_index in range(row_count):
+        row = [row_index + 1]
+        for field in normalized_fields:
+            values = field["values"]
+            row.append(_format_generic_value(values[row_index]) if row_index < len(values) else "")
+        raw_rows.append(row)
 
     student = request["student"]
     return {
+        "report_mode": experiment.get("report_mode") or "llm_generic",
         "experiment_id": request["experiment_id"],
         "experiment_name": experiment["name"],
+        "experiment_description": experiment.get("description") or "",
         "student": student,
         "options": request["options"],
-        "data": {"length_m": length_m, "period_s": period_s},
-        "uncertainties": {
-            "length": length_uncertainty,
-            "period": period_uncertainty,
-        },
-        "rows": rows,
+        "data": normalized_data,
+        "fields": normalized_fields,
+        "raw_headers": raw_headers,
+        "raw_rows": raw_rows,
+        "ocr_meta": request.get("ocr_meta") or {},
     }
 
 
-def compute_pendulum(normalized: dict) -> dict:
-    rows = normalized["rows"]
-    calc_rows = []
-    g_values = []
-    for row in rows:
-        length = row["length_m"]
-        period = row["period_s"]
-        period_squared = period**2
-        g_value = 4 * math.pi**2 * length / period_squared
-        g_values.append(g_value)
-        calc_rows.append(
-            {
-                "index": row["index"],
-                "length_m": length,
-                "period_s": period,
-                "period_squared": period_squared,
-                "g_value": g_value,
-            }
-        )
-
-    g_mean = mean(g_values)
-    g_std = stdev(g_values) if len(g_values) > 1 else 0.0
-    g_a_uncertainty = g_std / math.sqrt(len(g_values)) if g_values else 0.0
-    fit_result = _linear_fit(
-        [row["length_m"] for row in rows],
-        [row["period_s"] ** 2 for row in rows],
-    )
-    g_fit = 4 * math.pi**2 / fit_result["slope"] if fit_result["slope"] > 0 else None
-
-    mean_length = mean([row["length_m"] for row in rows])
-    mean_period = mean([row["period_s"] for row in rows])
-    length_uncertainty = normalized.get("uncertainties", {}).get("length", {})
-    period_uncertainty = normalized.get("uncertainties", {}).get("period", {})
-    g_b_length_uncertainty = 0.0
-    g_b_period_uncertainty = 0.0
-    if length_uncertainty.get("enabled") and mean_length:
-        g_b_length_uncertainty = abs(g_mean / mean_length) * length_uncertainty.get("standard", 0.0)
-    if period_uncertainty.get("enabled") and mean_period:
-        g_b_period_uncertainty = abs(2 * g_mean / mean_period) * period_uncertainty.get("standard", 0.0)
-    g_b_uncertainty = math.sqrt(g_b_length_uncertainty**2 + g_b_period_uncertainty**2)
-    g_uncertainty = math.sqrt(g_a_uncertainty**2 + g_b_uncertainty**2)
-
+def build_generic_local_narrative(normalized: dict) -> dict:
+    experiment_name = normalized["experiment_name"]
+    field_names = "、".join(field["label"] for field in normalized["fields"])
     return {
-        "metrics": {
-            "g_mean": {"value": g_mean, "unit": "m/s^2", "precision": 4},
-            "g_std": {"value": g_std, "unit": "m/s^2", "precision": 4},
-            "g_a_uncertainty": {"value": g_a_uncertainty, "unit": "m/s^2", "precision": 4},
-            "g_b_length_uncertainty": {"value": g_b_length_uncertainty, "unit": "m/s^2", "precision": 4},
-            "g_b_period_uncertainty": {"value": g_b_period_uncertainty, "unit": "m/s^2", "precision": 4},
-            "g_b_uncertainty": {"value": g_b_uncertainty, "unit": "m/s^2", "precision": 4},
-            "g_uncertainty": {"value": g_uncertainty, "unit": "m/s^2", "precision": 4},
-            "g_fit": {"value": g_fit, "unit": "m/s^2", "precision": 4},
-        },
-        "fit": fit_result,
-        "rows": calc_rows,
-        "uncertainty_breakdown": {
-            "mean_length": mean_length,
-            "mean_period": mean_period,
-            "length_source": length_uncertainty,
-            "period_source": period_uncertainty,
-        },
-        "checks": _compute_checks(g_mean, fit_result, g_fit, len(rows)),
+        "generic_formula_lines": [
+            f"根据《{experiment_name}》实验原理，对记录表中的 {field_names} 等数据进行整理。",
+            "结合实验装置的平衡条件、仪器读数和重复测量结果，对待测物理量进行计算和比较。",
+        ],
+        "generic_processing_summary": "根据实验记录表整理各测量量，数据处理时应结合实验原理、仪器校准信息和有效数字规则。",
+        "generic_result_headers": ["项目", "内容"],
+        "generic_result_rows": [["数据组数", str(len(normalized["raw_rows"]))], ["记录字段", field_names]],
+        "uncertainty_summary": "不确定度分析应结合实验仪器分度值、重复测量情况和实验原理进行评定。",
+        "final_result": "实验结果见数据处理与结果总结。",
+        "result_summary": f"本实验完成了 {experiment_name} 的数据记录与整理，主要记录量包括 {field_names}。",
+        "error_analysis": "主要误差来源需结合仪器读数、连接与调零状态、环境条件以及重复测量离散性进行分析。",
+        "thinking_answer": None,
     }
 
 
-def build_local_narrative(normalized: dict, compute_result: dict) -> dict:
-    g_result_text = _metric_with_uncertainty_text(compute_result, "g_mean", "g_uncertainty")
-    g_fit = _metric_text(compute_result, "g_fit", significant_digits=4)
-    g_a_uncertainty = _uncertainty_metric_text(compute_result, "g_a_uncertainty")
-    g_uncertainty = _uncertainty_metric_text(compute_result, "g_uncertainty")
-    enabled_b_fields = _enabled_b_uncertainty_fields(compute_result)
-    fit_r2 = compute_result["fit"].get("r2")
-    r2_text = "不可用" if fit_r2 is None else f"{fit_r2:.4f}"
-    final_result = f"g = {g_result_text}"
-    result_summary = (
-        f"本实验根据单摆周期公式对 {len(normalized['rows'])} 组摆长与周期数据进行处理。"
-        f"平均法结果为 g = {g_result_text}，线性拟合得到的重力加速度为 {g_fit}，"
-        f"拟合优度 R² 为 {r2_text}。"
-    )
-    error_analysis = (
-        "主要误差可能来自摆长读数、周期计时反应误差、摆角过大导致的小角度近似偏差，"
-        "以及空气阻力和支点摩擦等非理想因素。建议增加重复测量次数，并尽量保持小摆角释放。"
-    )
-    if enabled_b_fields:
-        b_parts = "，".join(
-            f"{field['symbol']} = {_uncertainty_metric_text(compute_result, field['metric_key'])}"
-            for field in enabled_b_fields
-        )
-        uncertainty_summary = (
-            f"A 类标准不确定度 u_A(g) = {g_a_uncertainty}；"
-            f"B 类分量 {b_parts}；"
-            f"最终合成标准不确定度 u_c(g) = {g_uncertainty}。"
-        )
-    else:
-        uncertainty_summary = f"A 类标准不确定度 u_A(g) = {g_a_uncertainty}，最终标准不确定度取 {g_uncertainty}。"
-    thinking_answer = None
-    if normalized["options"].get("include_thinking"):
-        thinking_answer = "若摆角较大，单摆周期会偏离小角度近似公式，通常会使计算得到的 g 出现系统偏差。"
-    return {
-        "result_summary": result_summary,
-        "error_analysis": error_analysis,
-        "uncertainty_summary": uncertainty_summary,
-        "final_result": final_result,
-        "thinking_answer": thinking_answer,
-    }
-
-
-def build_render_context(normalized: dict, compute_result: dict, narrative: dict) -> dict:
+def build_generic_render_context(
+    normalized: dict,
+    report_content: dict,
+    figures: list[dict],
+    plot_plan: dict,
+) -> dict:
     student = normalized["student"]
-    report_narrative = _sanitize_report_narrative(
-        narrative,
-        compute_result,
-        fallback=build_local_narrative(normalized, compute_result),
-    )
-    raw_rows = [
-        [row["index"], _fmt(row["length_m"], 4), _fmt(row["period_s"], 4)]
-        for row in normalized["rows"]
-    ]
-    calc_rows = [
-        [
-            row["index"],
-            _fmt(row["period_squared"], 5),
-            _fmt(row["g_value"], 5),
-        ]
-        for row in compute_result["rows"]
-    ]
-    fit = compute_result["fit"]
-    g_result_text = _metric_with_uncertainty_text(compute_result, "g_mean", "g_uncertainty")
-    uncertainty_rows = _uncertainty_rows(compute_result)
-    enabled_b_fields = _enabled_b_uncertainty_fields(compute_result)
     return {
+        "report_mode": "llm",
         "title": f"{normalized['experiment_name']}实验报告",
         "section_options": _section_options(normalized.get("options", {})),
         "student_name": student.get("name") or "未填写",
@@ -338,79 +240,105 @@ def build_render_context(normalized: dict, compute_result: dict, narrative: dict
         "experiment_date": student.get("date") or date.today().isoformat(),
         "experiment_id": normalized["experiment_id"],
         "experiment_name": normalized["experiment_name"],
-        "raw_headers": ["序号", "摆长 L / m", "周期 T / s"],
-        "raw_rows": raw_rows,
-        "calc_headers": ["序号", "T² / s²", "g / (m·s⁻²)"],
-        "calc_rows": calc_rows,
-        "g_mean": _metric_text(compute_result, "g_mean", significant_digits=4),
-        "g_fit": _metric_text(compute_result, "g_fit", significant_digits=4),
-        "g_a_uncertainty": _uncertainty_metric_text(compute_result, "g_a_uncertainty"),
-        "g_b_length_uncertainty": _uncertainty_metric_text(compute_result, "g_b_length_uncertainty"),
-        "g_b_period_uncertainty": _uncertainty_metric_text(compute_result, "g_b_period_uncertainty"),
-        "g_b_uncertainty": _uncertainty_metric_text(compute_result, "g_b_uncertainty"),
-        "g_uncertainty": _uncertainty_metric_text(compute_result, "g_uncertainty"),
-        "final_result": f"g = {g_result_text}",
-        "uncertainty_rows": uncertainty_rows,
-        "has_b_uncertainty": bool(enabled_b_fields),
-        "enabled_b_uncertainty_fields": enabled_b_fields,
-        "formula_method_label": enabled_b_fields[0]["method_label"] if enabled_b_fields else "",
-        "figures": compute_result.get("figures", []),
-        "fit_intercept": _fmt_with_unit(fit.get("intercept"), "s²"),
-        "fit_r2": "不可用" if fit.get("r2") is None else f"{fit['r2']:.4f}",
-        "result_summary": report_narrative["result_summary"],
-        "error_analysis": report_narrative["error_analysis"],
-        "uncertainty_summary": report_narrative["uncertainty_summary"],
-        "thinking_answer": report_narrative.get("thinking_answer"),
+        "experiment_description": normalized.get("experiment_description") or "",
+        "raw_headers": normalized["raw_headers"],
+        "raw_rows": normalized["raw_rows"],
+        "generic_formula_lines": report_content.get("generic_formula_lines") or [],
+        "generic_processing_summary": report_content.get("generic_processing_summary") or "",
+        "generic_result_headers": report_content.get("generic_result_headers") or ["项目", "内容"],
+        "generic_result_rows": report_content.get("generic_result_rows") or [],
+        "uncertainty_summary": report_content.get("uncertainty_summary") or "",
+        "final_result": report_content.get("final_result") or "",
+        "result_summary": report_content.get("result_summary") or "",
+        "error_analysis": report_content.get("error_analysis") or "",
+        "thinking_answer": report_content.get("thinking_answer"),
+        "need_plot": bool(plot_plan.get("need_plot")),
+        "plot_reason": plot_plan.get("reason") or "",
+        "force_computer_plot": bool(normalized.get("options", {}).get("force_computer_plot")),
+        "forced_plot_count": int(normalized.get("options", {}).get("forced_plot_count") or 1),
+        "figures": figures,
     }
 
 
-def _enabled_b_uncertainty_fields(compute_result: dict) -> list[dict]:
-    fields = []
-    specs = [
-        {
-            "field": "length",
-            "label": "摆长",
-            "symbol": "u_B(L)",
-            "metric_key": "g_b_length_uncertainty",
-            "propagation": "按 ∂g/∂L 传播",
-        },
-        {
-            "field": "period",
-            "label": "周期",
-            "symbol": "u_B(T)",
-            "metric_key": "g_b_period_uncertainty",
-            "propagation": "按 ∂g/∂T 传播",
-        },
-    ]
-    breakdown = compute_result.get("uncertainty_breakdown", {})
-    for spec in specs:
-        source = breakdown.get(f"{spec['field']}_source", {})
-        if source.get("enabled"):
-            fields.append(
-                {
-                    **spec,
-                    "method_label": source.get("method_label") or B_UNCERTAINTY_METHODS["half_division_uniform"]["label"],
-                }
-            )
-    return fields
-
-
-def _uncertainty_rows(compute_result: dict) -> list[list[str]]:
-    rows = [["A 类", _uncertainty_metric_text(compute_result, "g_a_uncertainty"), "样本标准差 / √n"]]
-    enabled_b_fields = _enabled_b_uncertainty_fields(compute_result)
-    for field in enabled_b_fields:
-        rows.append(
-            [
-                f"B 类({field['label']})",
-                _uncertainty_metric_text(compute_result, field["metric_key"]),
-                f"{field['method_label']}，{field['propagation']}",
-            ]
+def _sanitize_plot_plan(plot_plan: dict) -> dict:
+    safe_spec = plot_plan.get("safe_spec") if isinstance(plot_plan, dict) else {}
+    plots = []
+    for plot in (safe_spec or {}).get("plots") or []:
+        if not isinstance(plot, dict):
+            continue
+        plot_type = str(plot.get("plot_type") or "").strip()
+        if plot_type not in {"scatter", "line", "scatter_with_linear_fit", "bar"}:
+            continue
+        plots.append(
+            {
+                "key": str(plot.get("key") or f"plot_{len(plots) + 1}"),
+                "title": str(plot.get("title") or "计算机绘图"),
+                "caption": str(plot.get("caption") or plot.get("title") or "计算机绘图"),
+                "description": str(plot.get("description") or ""),
+                "position": str(plot.get("position") or "after_calculation_results"),
+                "plot_type": plot_type,
+                "x": plot.get("x") or {},
+                "y": plot.get("y") or {},
+                "fit": plot.get("fit") or {"enabled": False},
+            }
         )
-    if len(enabled_b_fields) > 1:
-        rows.append(["B 类合成", _uncertainty_metric_text(compute_result, "g_b_uncertainty"), "各 B 分量矢量和"])
-    if enabled_b_fields:
-        rows.append(["最终合成", _uncertainty_metric_text(compute_result, "g_uncertainty"), "√(u_A² + Σu_Bi²)"])
+    need_plot = bool(plot_plan.get("need_plot")) and bool(plots)
+    return {
+        "need_plot": need_plot,
+        "reason": str(plot_plan.get("reason") or ""),
+        "safe_spec": {"plots": plots},
+        "warnings": [str(item) for item in (plot_plan.get("warnings") or []) if str(item).strip()],
+    }
+
+
+def _render_safe_plots(run_dir: Path, normalized: dict, plot_plan: dict, warnings: list[str]) -> list[dict]:
+    figures: list[dict] = []
+    if not plot_plan.get("need_plot"):
+        return figures
+    safe_spec = plot_plan.get("safe_spec") or {}
+    for index, plot_spec in enumerate(safe_spec.get("plots") or [], start=1):
+        key = str(plot_spec.get("key") or f"plot_{index}")
+        output_path = run_dir / "figures" / f"{key}.png"
+        try:
+            figure = write_safe_plot(output_path, plot_spec, normalized)
+            if not figure.get("caption"):
+                figure["caption"] = plot_spec.get("caption") or plot_spec.get("title") or "计算机绘图"
+            figures.append(figure)
+        except Exception as exc:
+            warnings.append(f"safe_spec 绘图 {key} 失败，已跳过：{exc}")
+    return figures
+
+
+def _string_list(value: object, fallback: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        return fallback
+    cleaned = [str(item).strip() for item in value if str(item).strip()]
+    return cleaned or fallback
+
+
+def _table_rows(value: object) -> list[list[str]]:
+    rows = []
+    if not isinstance(value, list):
+        return rows
+    for row in value:
+        if isinstance(row, list):
+            rows.append([str(item) for item in row])
+        else:
+            rows.append([str(row)])
     return rows
+
+
+def _generic_header(field: dict) -> str:
+    unit = field.get("unit") or ""
+    return f"{field['label']} / {unit}" if unit else field["label"]
+
+
+def _format_generic_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return _format_significant(value, 6)
+    return str(value)
 
 
 def _section_options(options: dict) -> dict:
@@ -433,8 +361,19 @@ def validate_render_context(context: dict, required_fields: list[str]) -> None:
 
 def _with_defaults(request: dict, source: str) -> dict:
     student = request.get("student") or {}
-    options = {"include_thinking": False, "include_raw_appendix": True}
+    options = {
+        "include_thinking": False,
+        "include_raw_appendix": True,
+        "force_computer_plot": False,
+        "forced_plot_count": 1,
+    }
     options.update(request.get("options") or {})
+    options["force_computer_plot"] = bool(options.get("force_computer_plot"))
+    try:
+        forced_plot_count = int(options.get("forced_plot_count") or 1)
+    except (TypeError, ValueError):
+        forced_plot_count = 1
+    options["forced_plot_count"] = max(1, min(3, forced_plot_count))
     return {
         "experiment_id": request.get("experiment_id") or "exp_001",
         "student": {
@@ -450,47 +389,37 @@ def _with_defaults(request: dict, source: str) -> dict:
     }
 
 
-def _read_csv_series(rows: list[dict], candidates: list[str]) -> tuple[list[float], str]:
-    headers = rows[0].keys()
-    selected = next((name for name in candidates if name in headers), None)
-    if not selected:
-        raise WorkflowError(f"CSV 缺少字段，候选字段：{', '.join(candidates)}")
-    values = [_to_float(row.get(selected), selected) for row in rows]
-    unit = selected.rsplit("_", 1)[-1] if "_" in selected else "m"
-    if selected == "period":
-        unit = "s"
-    if selected == "length":
-        unit = "m"
-    return values, unit
+def _read_csv_generic_data(rows: list[dict], experiment: dict) -> dict:
+    headers = set(rows[0].keys())
+    data = {}
+    for field_name, spec in (experiment.get("fields") or {}).items():
+        selected, unit = _select_generic_csv_column(headers, field_name, spec)
+        if not selected:
+            raise WorkflowError(f"CSV 缺少字段 {spec.get('label') or field_name}，可用列名：{', '.join(_generic_csv_candidates(field_name, spec))}")
+        data[field_name] = {
+            "unit": unit,
+            "values": [_to_float(row.get(selected), selected) for row in rows],
+        }
+    return data
 
 
-def _extract_series(data: dict, field: str, aliases: list[str]) -> list[float]:
-    if field in data:
-        value = data[field]
-        if isinstance(value, dict):
-            unit = value.get("unit")
-            values = value.get("values")
-        else:
-            unit = "m" if field == "length" else "s"
-            values = value
-        return [_convert_unit(_to_float(item, field), unit, field) for item in values]
-
-    for alias in aliases:
-        if alias in data:
-            unit = alias.rsplit("_", 1)[-1]
-            if alias.endswith("_list") or alias.endswith("_values"):
-                unit = "s" if field == "period" else "m"
-            return [_convert_unit(_to_float(item, alias), unit, field) for item in data[alias]]
-    raise WorkflowError(f"缺少实验数据字段：{field}")
+def _select_generic_csv_column(headers: set[str], field_name: str, spec: dict) -> tuple[str | None, str]:
+    base_unit = spec.get("base_unit") or ""
+    candidates = _generic_csv_candidates(field_name, spec)
+    for candidate, unit in candidates.items():
+        if candidate in headers:
+            return candidate, unit
+    return None, base_unit
 
 
-def _convert_unit(value: float, unit: str | None, field: str) -> float:
-    if unit is None:
-        raise WorkflowError(f"字段 {field} 缺少单位。")
-    unit = unit.strip()
-    if unit not in UNIT_FACTORS:
-        raise WorkflowError(f"字段 {field} 不支持单位 {unit!r}。")
-    return value * UNIT_FACTORS[unit]
+def _generic_csv_candidates(field_name: str, spec: dict) -> dict[str, str]:
+    label = spec.get("label") or field_name
+    base_unit = spec.get("base_unit") or ""
+    candidates = {field_name: base_unit, label: base_unit}
+    for unit in spec.get("accepted_units") or [base_unit]:
+        candidates[f"{field_name}_{unit}"] = unit
+        candidates[f"{label}_{unit}"] = unit
+    return candidates
 
 
 def _to_float(value: object, field: str) -> float:
@@ -502,189 +431,38 @@ def _to_float(value: object, field: str) -> float:
         raise WorkflowError(f"字段 {field} 的值不是数字：{value!r}") from exc
 
 
-def _check_range(field: str, value: float, spec: dict, index: int) -> None:
-    if not (spec["min"] <= value <= spec["max"]):
-        raise WorkflowError(
-            f"第 {index} 行 {spec['label']} 超出 demo 合理范围：{value} {spec['base_unit']}，"
-            f"期望 {spec['min']}~{spec['max']} {spec['base_unit']}。"
-        )
-
-
-def _normalize_b_uncertainty(data: dict, field: str, base_unit: str) -> dict:
-    field_data = data.get(field)
-    if not isinstance(field_data, dict):
-        return {"enabled": False}
-    raw_uncertainty = field_data.get("b_uncertainty") or {}
-    if not raw_uncertainty.get("enabled"):
-        return {"enabled": False}
-    division = raw_uncertainty.get("division")
-    if division in (None, ""):
-        raise WorkflowError(f"字段 {field} 已启用 B 类不确定度，但没有填写分度值。")
-    source_unit = raw_uncertainty.get("unit") or field_data.get("unit") or base_unit
-    division_base = _convert_unit(_to_float(division, f"{field}.b_uncertainty.division"), source_unit, field)
-    if division_base <= 0:
-        raise WorkflowError(f"字段 {field} 的仪器分度值必须大于 0。")
-    method = raw_uncertainty.get("method") or "half_division_uniform"
-    if method not in B_UNCERTAINTY_METHODS:
-        supported = ", ".join(B_UNCERTAINTY_METHODS)
-        raise WorkflowError(f"字段 {field} 的 B 类不确定度方法 {method!r} 不支持，可选：{supported}")
-    return {
-        "enabled": True,
-        "division": division_base,
-        "unit": base_unit,
-        "source_unit": source_unit,
-        "method": method,
-        "method_label": B_UNCERTAINTY_METHODS[method]["label"],
-        "standard": _standard_uncertainty_from_division(division_base, method),
-    }
-
-
-def _standard_uncertainty_from_division(division: float, method: str) -> float:
-    if method == "division_uniform":
-        return division / math.sqrt(3)
-    return division / (2 * math.sqrt(3))
-
-
-def _b_uncertainty_label(compute_result: dict, field: str) -> str:
-    source = compute_result.get("uncertainty_breakdown", {}).get(f"{field}_source", {})
-    if not source.get("enabled"):
-        return ""
-    return source.get("method_label") or B_UNCERTAINTY_METHODS["half_division_uniform"]["label"]
-
-
-def _linear_fit(x_values: list[float], y_values: list[float]) -> dict:
-    x_mean = mean(x_values)
-    y_mean = mean(y_values)
-    sxx = sum((x - x_mean) ** 2 for x in x_values)
-    if sxx == 0:
-        return {"slope": 0.0, "intercept": y_mean, "r2": None}
-    sxy = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values))
-    slope = sxy / sxx
-    intercept = y_mean - slope * x_mean
-    predictions = [slope * x + intercept for x in x_values]
-    ss_res = sum((y - pred) ** 2 for y, pred in zip(y_values, predictions))
-    ss_tot = sum((y - y_mean) ** 2 for y in y_values)
-    r2 = None if ss_tot == 0 else 1 - ss_res / ss_tot
-    return {"slope": slope, "intercept": intercept, "r2": r2}
-
-
-def _compute_checks(g_mean: float, fit_result: dict, g_fit: float | None, row_count: int) -> list[dict]:
-    checks = []
-    if row_count < 5:
-        checks.append({"level": "warning", "code": "SMALL_SAMPLE_SIZE", "message": "数据组数少于 5，建议增加重复测量。"})
-    if not (8.0 <= g_mean <= 11.0):
-        checks.append({"level": "warning", "code": "G_MEAN_OUT_OF_RANGE", "message": "平均法 g 偏离常见地表范围。"})
-    if g_fit is None or not (8.0 <= g_fit <= 11.0):
-        checks.append({"level": "warning", "code": "G_FIT_OUT_OF_RANGE", "message": "拟合法 g 偏离常见地表范围。"})
-    if fit_result.get("r2") is not None and fit_result["r2"] < 0.95:
-        checks.append({"level": "warning", "code": "LOW_FIT_R2", "message": "线性拟合 R² 较低，请检查数据。"})
-    return checks
-
-
-def _metric_text(compute_result: dict, key: str, *, significant_digits: int = 5) -> str:
-    metric = compute_result["metrics"][key]
-    return _fmt_with_unit(metric.get("value"), metric["unit"], significant_digits=significant_digits)
-
-
-def _uncertainty_metric_text(compute_result: dict, key: str) -> str:
-    metric = compute_result["metrics"][key]
-    return _fmt_uncertainty_with_unit(metric.get("value"), metric["unit"])
-
-
-def _metric_with_uncertainty_text(compute_result: dict, value_key: str, uncertainty_key: str) -> str:
-    value_metric = compute_result["metrics"][value_key]
-    uncertainty_metric = compute_result["metrics"][uncertainty_key]
-    value = value_metric.get("value")
-    uncertainty = uncertainty_metric.get("value")
-    unit = value_metric["unit"]
-    if value is None:
-        return f"不可用 {unit}"
-    if uncertainty is None or uncertainty == 0:
-        return f"{_format_significant(float(value), 4)} {unit}"
-    uncertainty_text, decimals = _format_uncertainty(float(uncertainty))
-    value_text = _format_decimal_place(float(value), decimals)
-    return f"({value_text} ± {uncertainty_text}) {unit}"
-
-
-def _metric_value(compute_result: dict, key: str) -> float:
-    metric = compute_result["metrics"][key]
-    return float(metric.get("value") or 0.0)
-
-
-def _fmt_with_unit(value: float | None, unit: str, *, significant_digits: int = 5) -> str:
-    if value is None:
-        return "不可用"
-    return f"{_format_significant(value, significant_digits)} {unit}"
-
-
-def _fmt_uncertainty_with_unit(value: float | None, unit: str) -> str:
-    if value is None:
-        return "不可用"
-    return f"{_format_uncertainty(value)[0]} {unit}"
-
-
-def _fmt(value: float, digits: int) -> str:
-    return f"{value:.{digits}g}"
-
-
-def _format_uncertainty(value: float) -> tuple[str, int]:
-    abs_value = abs(value)
-    if abs_value == 0:
-        return "0", 0
-    exponent = math.floor(math.log10(abs_value))
-    first_digit = int(abs_value / (10**exponent))
-    significant_digits = 2 if first_digit in (1, 2) else 1
-    decimals = significant_digits - 1 - exponent
-    return _format_decimal_place(value, decimals), decimals
-
-
-def _format_decimal_place(value: float, decimals: int) -> str:
-    rounded = round(value, decimals)
-    if decimals > 0:
-        return f"{rounded:.{decimals}f}"
-    if decimals == 0:
-        return f"{rounded:.0f}"
-    return f"{rounded:.0f}"
-
-
 def _format_significant(value: float, significant_digits: int) -> str:
     if value == 0:
         return "0"
     return f"{value:.{significant_digits}g}"
 
 
-def _sanitize_narrative(llm_narrative: dict, fallback: dict, compute_result: dict) -> dict:
+def _sanitize_generic_narrative(llm_narrative: dict, fallback: dict, normalized: dict) -> dict:
+    has_b_uncertainty = any(
+        isinstance(field, dict) and (field.get("b_uncertainty") or {}).get("enabled")
+        for field in (normalized.get("fields") or [])
+    )
     result = {}
-    result["result_summary"] = fallback.get("result_summary")
-    for key in ["error_analysis", "thinking_answer"]:
+    result["generic_formula_lines"] = _string_list(llm_narrative.get("generic_formula_lines"), fallback.get("generic_formula_lines") or [])
+    for key in ["generic_processing_summary", "uncertainty_summary", "final_result", "result_summary", "error_analysis", "thinking_answer"]:
         value = llm_narrative.get(key)
         if isinstance(value, str) and value.strip():
-            cleaned = _sanitize_report_text(value.strip(), compute_result)
+            cleaned = _sanitize_report_text(value.strip(), has_b_uncertainty=has_b_uncertainty)
             result[key] = cleaned or fallback.get(key)
         else:
             result[key] = fallback.get(key)
+    headers = llm_narrative.get("generic_result_headers")
+    rows = llm_narrative.get("generic_result_rows")
+    result["generic_result_headers"] = [str(item) for item in headers] if isinstance(headers, list) and headers else fallback.get("generic_result_headers")
+    result["generic_result_rows"] = _table_rows(rows) if isinstance(rows, list) and rows else fallback.get("generic_result_rows")
     return result
 
 
-def _sanitize_report_narrative(narrative: dict, compute_result: dict, fallback: dict | None = None) -> dict:
-    result = dict(narrative)
-    for key in ["result_summary", "error_analysis", "uncertainty_summary", "thinking_answer"]:
-        value = result.get(key)
-        if isinstance(value, str) and value.strip():
-            cleaned = _sanitize_report_text(value.strip(), compute_result)
-            if cleaned:
-                result[key] = cleaned
-            elif fallback is not None:
-                result[key] = fallback.get(key)
-    return result
-
-
-def _sanitize_report_text(text: str, compute_result: dict) -> str:
-    enabled_b_fields = _enabled_b_uncertainty_fields(compute_result)
+def _sanitize_report_text(text: str, *, has_b_uncertainty: bool) -> str:
     sentences = _split_report_sentences(text)
     kept_sentences = []
     for sentence in sentences:
-        if _is_internal_uncertainty_note(sentence, has_b_uncertainty=bool(enabled_b_fields)):
+        if _is_internal_uncertainty_note(sentence, has_b_uncertainty=has_b_uncertainty):
             continue
         kept_sentences.append(sentence)
     return _normalize_report_wording("".join(kept_sentences)).strip()

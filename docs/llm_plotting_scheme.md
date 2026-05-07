@@ -1,18 +1,16 @@
 # LLM 绘图调用方案
 
-当前 demo 已实现确定性本地绘图：单摆实验会生成 `figures/pendulum_fit.png`，并插入到 Word 报告的“计算公式”和“计算结果”之后。
+当前 demo 采用“LLM 先判断是否需要绘图，再给出受控 `safe_spec`，本地绘图器只执行白名单绘图”的方案。
 
-后续扩展更多实验时，建议采用“LLM 只做绘图规划，本地执行受控绘图”的方案。
-
-## 推荐流程
+## 流程
 
 ```text
-ComputeResult
-  -> LLM Plot Planner
-  -> plot_plan.json
+标准化输入
+  -> LLM 报告内容生成
+  -> LLM 绘图计划生成（need_plot + safe_spec）
   -> 本地校验 safe_spec
-  -> 本地绘图器生成 PNG
-  -> 写入 compute_result.figures
+  -> 本地受控绘图器生成 PNG
+  -> 写入 report figures
   -> Word Renderer 插入图片
 ```
 
@@ -21,43 +19,43 @@ ComputeResult
 ```json
 {
   "need_plot": true,
-  "plots": [
-    {
-      "key": "pendulum_fit",
-      "title": "T²-L 线性拟合图",
-      "position": "after_calculation_results",
-      "safe_spec": {
+  "reason": "需要绘图的原因",
+  "safe_spec": {
+    "plots": [
+      {
+        "key": "plot_1",
+        "title": "图标题",
+        "caption": "图注",
+        "description": "说明横轴、纵轴和主要趋势",
+        "position": "after_calculation_results",
         "plot_type": "scatter_with_linear_fit",
-        "x": {"source": "normalized_input.data.length_m", "label": "L / m"},
-        "y": {"source": "computed.period_squared", "label": "T² / s²"},
-        "fit": {"source": "compute_result.fit", "enabled": true}
-      },
-      "python_code_required": false,
-      "python_code": null
-    }
-  ]
+        "x": {
+          "source": "normalized_input.data.field_a.values",
+          "label": "x 轴名称",
+          "transform": "identity"
+        },
+        "y": {
+          "source": "normalized_input.data.field_b.values",
+          "label": "y 轴名称",
+          "transform": "square"
+        },
+        "fit": {"enabled": true, "kind": "linear"}
+      }
+    ]
+  },
+  "warnings": []
 }
 ```
 
-## Python 代码模式
+## 约束
 
-可以保留 `python_code` 作为高级模式，但不建议直接执行 LLM 原始代码。更安全的做法是：
-
-- 优先使用 `safe_spec` 映射到本地绘图函数。
-- 若必须执行 Python 代码，只允许 `draw(data, output_path)` 函数。
-- 使用 AST 检查禁止 `os`、`subprocess`、`socket`、`requests`、`open` 等危险能力。
-- 放入隔离子进程执行，限制超时和输出目录。
-- 执行后只接受 PNG/JPEG/SVG 等明确文件类型。
+- `need_plot` 为 `false` 时，`safe_spec.plots` 必须为空。
+- `plot_type` 只允许：`scatter`、`line`、`scatter_with_linear_fit`、`bar`。
+- `source` 只允许引用 `normalized_input` 中已有数据。
+- `transform` 只允许：`identity`、`square`、`sqrt`、`abs`、`log10`、`none`。
+- 不返回 Python 代码，不执行 LLM 代码。
+- 最多返回 3 张图。
 
 ## 插图位置
 
-推荐统一插入到：
-
-```text
-三、实验数据处理
-  1. 计算公式
-  2. 计算结果
-  3. 计算机绘图
-```
-
-这样与 `train/` 下样例报告的“数据处理 -> 图像/拟合 -> 结果分析”结构一致。
+推荐统一插入到“实验数据处理”部分，放在公式和结果表之后。

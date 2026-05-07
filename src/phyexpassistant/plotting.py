@@ -16,28 +16,47 @@ ACCENT: Color = (40, 104, 220)
 FIT: Color = (220, 80, 80)
 
 
-def write_pendulum_fit_plot(
-    path: Path,
-    lengths_m: list[float],
-    periods_s: list[float],
-    slope: float,
-    intercept: float,
-    r2: float | None,
-) -> dict:
-    x_values = lengths_m
-    y_values = [period**2 for period in periods_s]
-    caption = "T²-L 线性拟合图"
-    write_xy_fit_plot(path, x_values, y_values, slope, intercept)
+def write_safe_plot(path: Path, plot_spec: dict, data_context: dict) -> dict:
+    plot_type = str(plot_spec.get("plot_type") or "").strip()
+    if plot_type not in {"scatter", "line", "scatter_with_linear_fit", "bar"}:
+        raise ValueError(f"不支持的 safe_spec.plot_type：{plot_type!r}")
+
+    x_spec = plot_spec.get("x") or {}
+    y_spec = plot_spec.get("y") or {}
+    x_values = _series_from_spec(x_spec, data_context)
+    y_values = _series_from_spec(y_spec, data_context)
+    if not x_values:
+        x_values = [float(index + 1) for index in range(len(y_values))]
+    row_count = min(len(x_values), len(y_values))
+    if row_count == 0:
+        raise ValueError("safe_spec 没有可绘制的数据点。")
+    x_values = x_values[:row_count]
+    y_values = y_values[:row_count]
+
+    fit = None
+    if plot_type == "scatter_with_linear_fit" or (plot_spec.get("fit") or {}).get("enabled"):
+        fit = _linear_fit_for_plot(x_values, y_values)
+
+    _write_xy_plot(path, x_values, y_values, plot_type=plot_type, fit=fit)
+    caption = plot_spec.get("caption") or plot_spec.get("title") or "计算机绘图"
     return {
-        "key": "pendulum_fit",
+        "key": str(plot_spec.get("key") or path.stem),
         "path": str(path),
-        "caption": caption,
-        "description": "横轴为摆长 L，纵轴为周期平方 T²，红线为线性拟合结果。",
-        "r2": r2,
+        "caption": str(caption),
+        "description": str(plot_spec.get("description") or _plot_description(plot_spec, fit)),
+        "position": str(plot_spec.get("position") or "after_calculation_results"),
+        "safe_spec": plot_spec,
     }
 
 
-def write_xy_fit_plot(path: Path, x_values: list[float], y_values: list[float], slope: float, intercept: float) -> None:
+def _write_xy_plot(
+    path: Path,
+    x_values: list[float],
+    y_values: list[float],
+    *,
+    plot_type: str,
+    fit: dict | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     width, height = 1000, 650
     margin_left, margin_right, margin_top, margin_bottom = 95, 45, 55, 85
@@ -49,9 +68,12 @@ def write_xy_fit_plot(path: Path, x_values: list[float], y_values: list[float], 
 
     x_min, x_max = min(x_values), max(x_values)
     y_min, y_max = min(y_values), max(y_values)
-    fit_y_values = [slope * x_min + intercept, slope * x_max + intercept]
-    y_min = min(y_min, *fit_y_values)
-    y_max = max(y_max, *fit_y_values)
+    if fit:
+        slope = float(fit.get("slope") or 0.0)
+        intercept = float(fit.get("intercept") or 0.0)
+        fit_y_values = [slope * x_min + intercept, slope * x_max + intercept]
+        y_min = min(y_min, *fit_y_values)
+        y_max = max(y_max, *fit_y_values)
     x_pad = (x_max - x_min) * 0.08 or 0.1
     y_pad = (y_max - y_min) * 0.12 or 0.1
     x_min -= x_pad
@@ -82,15 +104,102 @@ def write_xy_fit_plot(path: Path, x_values: list[float], y_values: list[float], 
     _draw_line(image, width, plot_left, plot_bottom, plot_right, plot_bottom, INK, thickness=2)
     _draw_line(image, width, plot_left, plot_top, plot_left, plot_bottom, INK, thickness=2)
 
-    fit_x1, fit_x2 = x_min, x_max
-    fit_y1, fit_y2 = slope * fit_x1 + intercept, slope * fit_x2 + intercept
-    _draw_line(image, width, map_x(fit_x1), map_y(fit_y1), map_x(fit_x2), map_y(fit_y2), FIT, thickness=3)
+    if fit:
+        slope = float(fit.get("slope") or 0.0)
+        intercept = float(fit.get("intercept") or 0.0)
+        fit_x1, fit_x2 = x_min, x_max
+        fit_y1, fit_y2 = slope * fit_x1 + intercept, slope * fit_x2 + intercept
+        _draw_line(image, width, map_x(fit_x1), map_y(fit_y1), map_x(fit_x2), map_y(fit_y2), FIT, thickness=3)
+
+    if plot_type == "line":
+        for first, second in zip(zip(x_values, y_values), zip(x_values[1:], y_values[1:])):
+            _draw_line(image, width, map_x(first[0]), map_y(first[1]), map_x(second[0]), map_y(second[1]), ACCENT, thickness=3)
+    elif plot_type == "bar":
+        bar_width = max(4, round((plot_right - plot_left) / max(1, len(x_values) * 3)))
+        baseline = map_y(0 if y_min <= 0 <= y_max else y_min)
+        for x_value, y_value in zip(x_values, y_values):
+            x_center = map_x(x_value)
+            y_top = map_y(y_value)
+            for x in range(x_center - bar_width, x_center + bar_width + 1):
+                _draw_line(image, width, x, baseline, x, y_top, ACCENT)
 
     for x_value, y_value in zip(x_values, y_values):
         _draw_circle(image, width, map_x(x_value), map_y(y_value), 6, ACCENT)
         _draw_circle(image, width, map_x(x_value), map_y(y_value), 3, WHITE)
 
     _write_png(path, image, width, height)
+
+
+def _series_from_spec(axis_spec: dict, data_context: dict) -> list[float]:
+    source = str(axis_spec.get("source") or "").strip()
+    if not source:
+        return []
+    values = _resolve_source(source, data_context)
+    if isinstance(values, dict) and "values" in values:
+        values = values["values"]
+    if not isinstance(values, list):
+        return []
+    transform = str(axis_spec.get("transform") or "identity").strip()
+    return [_apply_transform(float(value), transform) for value in values if value not in (None, "")]
+
+
+def _resolve_source(source: str, data_context: dict):
+    parts = source.split(".")
+    if parts and parts[0] == "normalized_input":
+        parts = parts[1:]
+    current = data_context
+    for part in parts:
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list) and part.isdigit():
+            current = current[int(part)]
+        else:
+            return None
+    return current
+
+
+def _apply_transform(value: float, transform: str) -> float:
+    if transform in {"", "identity", "none"}:
+        return value
+    if transform == "square":
+        return value * value
+    if transform == "sqrt":
+        return math.sqrt(value)
+    if transform == "abs":
+        return abs(value)
+    if transform == "log10":
+        return math.log10(value)
+    raise ValueError(f"不支持的 safe_spec transform：{transform!r}")
+
+
+def _linear_fit_for_plot(x_values: list[float], y_values: list[float]) -> dict:
+    count = min(len(x_values), len(y_values))
+    if count < 2:
+        return {"slope": 0.0, "intercept": y_values[0] if y_values else 0.0, "r2": None}
+    x_values = x_values[:count]
+    y_values = y_values[:count]
+    x_mean = sum(x_values) / count
+    y_mean = sum(y_values) / count
+    sxx = sum((x - x_mean) ** 2 for x in x_values)
+    if sxx == 0:
+        return {"slope": 0.0, "intercept": y_mean, "r2": None}
+    sxy = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values))
+    slope = sxy / sxx
+    intercept = y_mean - slope * x_mean
+    predictions = [slope * x + intercept for x in x_values]
+    ss_res = sum((y - prediction) ** 2 for y, prediction in zip(y_values, predictions))
+    ss_tot = sum((y - y_mean) ** 2 for y in y_values)
+    r2 = None if ss_tot == 0 else 1 - ss_res / ss_tot
+    return {"slope": slope, "intercept": intercept, "r2": r2}
+
+
+def _plot_description(plot_spec: dict, fit: dict | None) -> str:
+    x_label = (plot_spec.get("x") or {}).get("label") or "x"
+    y_label = (plot_spec.get("y") or {}).get("label") or "y"
+    description = f"横轴为 {x_label}，纵轴为 {y_label}。"
+    if fit and fit.get("r2") is not None:
+        description += f"线性拟合 R² = {fit['r2']:.4f}。"
+    return description
 
 
 def _new_canvas(width: int, height: int, color: Color) -> bytearray:

@@ -8,6 +8,8 @@ import re
 import urllib.error
 import urllib.request
 
+from .experiments import get_experiment
+from .paths import package_path
 from .settings import Settings
 
 
@@ -26,9 +28,26 @@ class LLMClient:
         if not image_path.exists():
             raise LLMError(f"图片不存在：{image_path}")
 
+        experiment = get_experiment(experiment_id)
+        experiment_name = experiment.get("name") or experiment_id
+        experiment_description = experiment.get("description") or ""
+        experiment_label = f"{experiment_name}（{experiment_description}）" if experiment_description else experiment_name
+        target_template = _build_ocr_target_template(experiment_id, experiment)
+        field_specs = [
+            {
+                "field": field_name,
+                "label": field_meta.get("label") or field_name,
+                "base_unit": field_meta.get("base_unit") or "",
+                "accepted_units": field_meta.get("accepted_units") or [],
+            }
+            for field_name, field_meta in (experiment.get("fields") or {}).items()
+        ]
+
         mime_type = mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
         image_b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
         data_url = f"data:{mime_type};base64,{image_b64}"
+        field_specs_json = json.dumps(field_specs, ensure_ascii=False, indent=2)
+        target_json = json.dumps(target_template, ensure_ascii=False, indent=2)
 
         system_prompt = (
             "你是物理实验数据录入助手。请从手写实验数据图片中识别实验数据，"
@@ -36,39 +55,20 @@ class LLMClient:
             "并在 warnings 中说明。数字必须保留原始识别字符串 raw 和 confidence。"
         )
         user_text = f"""
-请识别图片中的实验数据，并整理成如下 JSON。当前 demo 只支持 experiment_id={experiment_id} 的单摆实验。
+请识别图片中的实验数据，并整理成如下 JSON。当前 demo 选择的实验模板为：{experiment_label}，后台 experiment_id={experiment_id}。
+
+字段说明：
+{field_specs_json}
 
 目标 JSON：
-{{
-  "experiment_id": "exp_001",
-  "student": {{
-    "name": null,
-    "student_id": null,
-    "class_name": null,
-    "date": null
-  }},
-  "options": {{
-    "include_thinking": false,
-    "include_raw_appendix": true
-  }},
-  "data": {{
-    "length": {{"unit": "m", "values": [0.5, 0.6], "b_uncertainty": {{"enabled": false}}}},
-    "period": {{"unit": "s", "values": [1.42, 1.55], "b_uncertainty": {{"enabled": false}}}}
-  }},
-  "ocr_meta": {{
-    "confidence": 0.0,
-    "recognized_cells": [
-      {{"field": "length", "raw": "50.0", "value": 50.0, "unit": "cm", "confidence": 0.8}}
-    ],
-    "warnings": []
-  }}
-}}
+{target_json}
 
 要求：
-1. length 表示摆长，period 表示周期。
-2. 如果图片里单位是 cm/mm/ms，请保留对应 unit，不要擅自换算。
+1. data 里的键必须严格使用字段说明中的 field 名称。
+2. unit 优先使用图片中出现的单位；若图片没有明确单位，则使用 base_unit。
 3. values 中只放数字或 null，不要放带单位的字符串。
-4. 行数必须对应；无法确认的值用 null。
+4. 无法确认的字段用 null，并在 ocr_meta.warnings 中说明。
+5. 若某字段存在多个测量值，请按图片中的顺序写入 values。
 """.strip()
 
         content = [
@@ -77,24 +77,61 @@ class LLMClient:
         ]
         return self._chat_json(system_prompt, content)
 
-    def generate_narrative(self, normalized_input: dict, compute_result: dict) -> dict:
+    def generate_report_content(self, normalized_input: dict, experiment: dict) -> dict:
+        experiment_name = normalized_input.get("experiment_name") or experiment.get("name") or "未知实验"
+        experiment_description = normalized_input.get("experiment_description") or experiment.get("description") or ""
         system_prompt = (
-            "你是物理实验报告写作助手。只能根据给定 JSON 写报告文字，"
-            "不得修改、重算或编造任何数值。只输出 JSON。"
-            "若某个 B 类不确定度来源的 enabled 为 false，应视为该项不适用于本实验，"
-            "不要写“未启用”“未提供”“为 0”等程序状态描述；"
-            "若所有 B 类不确定度均不适用，不要提及 B 类不确定度或矢量合成。"
-            "文字应采用正式实验报告语气，不要出现“系统提示”“输入中”“设置中”等程序口吻。"
+            "你是物理实验报告写作助手。只能根据给定 JSON 写实验报告内容，"
+            "不得编造数据，不得修改字段名，只输出 JSON。"
+            "你需要根据不同实验模板生成该实验专属的公式说明、数据处理说明、结果总结和误差分析。"
+            "本地程序不会替你做实验专属推导；请根据 experiment.fields 和 normalized_input 自行组织内容。"
+            "若某个字段的 b_uncertainty.enabled 为 false，把它当作没有提供，不要写“未启用”“未提供”“为 0”等程序状态。"
+            "如果所有字段都没有启用 B 类不确定度，不要提及 B 类不确定度或矢量合成。"
+            "generic_formula_lines 应返回适合 Word 直接排版的简洁公式文本，不要输出 Markdown、代码块或 LaTeX 包裹。"
+            "如果实验模板或数据不足以给出数值结果，请明确说明原因，但不要提及系统内部流程。"
         )
         user_payload = {
-            "task": "根据锁定的计算结果生成实验报告中的结果总结和误差分析。",
+            "task": "根据实验模板和结构化数据生成实验报告内容。",
+            "experiment": {
+                "id": experiment.get("id") or normalized_input.get("experiment_id") or "",
+                "name": experiment_name,
+                "description": experiment_description,
+                "category": experiment.get("category") or "",
+                "report_mode": experiment.get("report_mode") or "llm",
+                "fields": experiment.get("fields") or {},
+            },
             "output_schema": {
+                "generic_formula_lines": ["string"],
+                "generic_processing_summary": "string",
+                "generic_result_headers": ["string"],
+                "generic_result_rows": [["string"]],
+                "uncertainty_summary": "string",
+                "final_result": "string",
                 "result_summary": "string",
                 "error_analysis": "string",
                 "thinking_answer": "string or null",
             },
             "normalized_input": normalized_input,
-            "compute_result": compute_result,
+        }
+        return self._chat_json(system_prompt, json.dumps(user_payload, ensure_ascii=False))
+
+    def plan_plots(self, normalized_input: dict, experiment: dict, report_content: dict) -> dict:
+        system_prompt = package_path("prompts", "plot_plan.txt").read_text(encoding="utf-8")
+        options = normalized_input.get("options") or {}
+        user_payload = {
+            "task": "根据实验模板、结构化输入和报告内容判断是否需要绘图，并给出 safe_spec。",
+            "plot_preferences": {
+                "force_computer_plot": bool(options.get("force_computer_plot")),
+                "forced_plot_count": int(options.get("forced_plot_count") or 1),
+            },
+            "experiment": {
+                "id": experiment.get("id"),
+                "name": experiment.get("name"),
+                "description": experiment.get("description"),
+                "fields": experiment.get("fields"),
+            },
+            "normalized_input": normalized_input,
+            "report_content": report_content,
         }
         return self._chat_json(system_prompt, json.dumps(user_payload, ensure_ascii=False))
 
@@ -149,3 +186,34 @@ def _loads_json_content(content: str) -> dict:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise LLMError(f"模型没有返回合法 JSON：{content}") from exc
+
+
+def _build_ocr_target_template(experiment_id: str, experiment: dict) -> dict:
+    data = {}
+    for field_name, field_meta in (experiment.get("fields") or {}).items():
+        data[field_name] = {
+            "label": field_meta.get("label") or field_name,
+            "unit": field_meta.get("base_unit") or "",
+            "values": [None, None],
+            "b_uncertainty": {"enabled": False},
+        }
+
+    return {
+        "experiment_id": experiment_id,
+        "student": {
+            "name": None,
+            "student_id": None,
+            "class_name": None,
+            "date": None,
+        },
+        "options": {
+            "include_thinking": False,
+            "include_raw_appendix": True,
+        },
+        "data": data,
+        "ocr_meta": {
+            "confidence": 0.0,
+            "recognized_cells": [],
+            "warnings": [],
+        },
+    }
