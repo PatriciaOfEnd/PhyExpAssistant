@@ -9,7 +9,19 @@ import random
 import sys
 
 from .llm_client import LLMClient, LLMError
-from .experiments import get_experiment, list_experiments
+from .experiments import (
+    experiment_catalog_text,
+    experiments_dir,
+    get_experiment,
+    list_experiments,
+    normalize_experiment_catalog,
+    normalize_generated_template_payload,
+    normalize_template_payload,
+    read_experiment_catalog,
+    reload_experiment_catalog,
+    validate_experiment_catalog,
+    save_experiment_catalog,
+)
 from .paths import app_home, app_icon_path, resolve_input_path
 from .settings import Settings, load_settings, save_settings
 from .workflow import (
@@ -216,15 +228,22 @@ def build_stylesheet(theme: ThemePalette, scale: float) -> str:
         }}
         QScrollArea#leftScrollArea,
         QScrollArea#manualScrollArea,
+        QScrollArea#ocrScrollArea,
+        QScrollArea#templateScrollArea,
         QWidget#mainContent,
         QWidget#leftPanelContent,
         QWidget#manualScrollContent,
+        QWidget#ocrScrollContent,
+        QWidget#templateScrollContent,
         QWidget#manualFieldsContainer,
-        QWidget#manualFooterContainer {{
+        QWidget#manualFooterContainer,
+        QWidget#ocrFooterContainer {{
             background: {theme.background};
             border: none;
         }}
-        QScrollArea#leftScrollArea {{
+        QScrollArea#leftScrollArea,
+        QScrollArea#ocrScrollArea,
+        QScrollArea#templateScrollArea {{
             padding: 0px;
             margin: 0px;
         }}
@@ -395,6 +414,9 @@ def build_stylesheet(theme: ThemePalette, scale: float) -> str:
         }}
         QPlainTextEdit {{
             min-height: {_scaled(180, scale, minimum=130)}px;
+        }}
+        QPlainTextEdit[compactTextEdit="true"] {{
+            min-height: 0px;
         }}
         QFrame#dateField {{
             background: {theme.input_bg};
@@ -1149,7 +1171,7 @@ def launch_ui(argv: list[str] | None = None) -> int:
             app = QApplication.instance()
             self._ui_scale = self._compute_ui_scale(app)
             self._theme_palette = build_theme_palette(self.settings)
-            self.setWindowTitle("PhyExpAssistant Demo")
+            self.setWindowTitle("PhyExpAssistant")
             self.setMinimumSize(self._s(760, minimum=620), self._s(520, minimum=430))
             self.resize(self._s(1600, minimum=820), self._s(900, minimum=560))
             self._build_ui(app)
@@ -1332,6 +1354,7 @@ def launch_ui(argv: list[str] | None = None) -> int:
 
             self.tabs.addTab(self._build_manual_tab(), "手动录入")
             self.tabs.addTab(self._build_ocr_tab(), "手写识别")
+            self.tabs.addTab(self._build_template_management_tab(), "模板管理")
             self._busy_widgets = [self.theme_button, self.left_scroll_area, self.tabs]
 
             footer = QFrame()
@@ -1544,6 +1567,176 @@ def launch_ui(argv: list[str] | None = None) -> int:
             layout.addWidget(self.ocr_footer_container, 0)
             return tab
 
+        def _build_template_management_tab(self) -> QWidget:
+            tab = QWidget()
+            layout = QVBoxLayout(tab)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(self._s(14, minimum=8))
+
+            self.template_scroll_area = QScrollArea(tab)
+            self.template_scroll_area.setObjectName("templateScrollArea")
+            self.template_scroll_area.setWidgetResizable(True)
+            self.template_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+            self.template_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.template_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.template_scroll_area.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            self.template_scroll_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+            self.template_scroll_content = QWidget(self.template_scroll_area)
+            self.template_scroll_content.setObjectName("templateScrollContent")
+            self.template_scroll_content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            template_layout = QVBoxLayout(self.template_scroll_content)
+            template_layout.setContentsMargins(0, 0, self._s(4, minimum=2), 0)
+            template_layout.setSpacing(self._s(14, minimum=8))
+            template_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+            def compact_editor(parent: QWidget, placeholder: str, height: int, *, minimum: int, no_wrap: bool = False) -> QPlainTextEdit:
+                editor = QPlainTextEdit(parent)
+                editor.setProperty("compactTextEdit", True)
+                editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                editor.setPlaceholderText(placeholder)
+                if no_wrap:
+                    editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+                editor.setFixedHeight(self._s(height, minimum=minimum))
+                return editor
+
+            catalog_card = QGroupBox("管理现有模板（多文件合并视图）", self.template_scroll_content)
+            catalog_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            catalog_layout = QVBoxLayout(catalog_card)
+            catalog_hint = QLabel(f"当前模板目录：{experiments_dir()}；编辑器显示合并视图，保存时会按实验 id 写回多个 .json 文件。", catalog_card)
+            catalog_hint.setObjectName("themeHint")
+            catalog_hint.setWordWrap(True)
+            self.template_catalog_editor = compact_editor(
+                catalog_card,
+                "这里是所有实验模板的合并视图；可直接编辑后保存为多个模板文件。",
+                360,
+                minimum=280,
+                no_wrap=True,
+            )
+            catalog_buttons = QHBoxLayout()
+            reload_button = QPushButton("重新载入", catalog_card)
+            reload_button.clicked.connect(self._load_template_catalog_editor)
+            validate_button = QPushButton("验证 JSON", catalog_card)
+            validate_button.clicked.connect(self._validate_template_catalog_editor)
+            format_button = QPushButton("格式化", catalog_card)
+            format_button.clicked.connect(self._format_template_catalog_editor)
+            save_button = QPushButton("保存到模板目录", catalog_card)
+            save_button.setObjectName("primaryButton")
+            save_button.clicked.connect(self._save_template_catalog_editor)
+            catalog_buttons.addWidget(reload_button)
+            catalog_buttons.addWidget(validate_button)
+            catalog_buttons.addWidget(format_button)
+            catalog_buttons.addStretch(1)
+            catalog_buttons.addWidget(save_button)
+            catalog_layout.addWidget(catalog_hint)
+            catalog_layout.addWidget(self.template_catalog_editor)
+            catalog_layout.addLayout(catalog_buttons)
+
+            paste_card = QGroupBox("直接粘贴导入模板", self.template_scroll_content)
+            paste_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            paste_layout = QVBoxLayout(paste_card)
+            paste_hint = QLabel("可粘贴完整模板目录合并 JSON、单个实验模板对象，或 {\"experiment\": {...}}。导入后会先校验，再合并到上方编辑器。", paste_card)
+            paste_hint.setObjectName("themeHint")
+            paste_hint.setWordWrap(True)
+            self.template_paste_input = compact_editor(paste_card, "在这里粘贴模板 JSON。", 180, minimum=130, no_wrap=True)
+            paste_buttons = QHBoxLayout()
+            paste_import_button = QPushButton("导入到编辑器", paste_card)
+            paste_import_button.setObjectName("primaryButton")
+            paste_import_button.clicked.connect(self._import_template_from_paste)
+            paste_clear_button = QPushButton("清空", paste_card)
+            paste_clear_button.clicked.connect(self.template_paste_input.clear)
+            paste_buttons.addStretch(1)
+            paste_buttons.addWidget(paste_clear_button)
+            paste_buttons.addWidget(paste_import_button)
+            paste_layout.addWidget(paste_hint)
+            paste_layout.addWidget(self.template_paste_input)
+            paste_layout.addLayout(paste_buttons)
+
+            file_card = QGroupBox("从 JSON 文件导入模板", self.template_scroll_content)
+            file_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            file_layout = QVBoxLayout(file_card)
+            file_row = QHBoxLayout()
+            self.template_file_input = QLineEdit(file_card)
+            self.template_file_input.setPlaceholderText("选择模板 JSON 文件")
+            file_browse_button = QPushButton("浏览", file_card)
+            file_browse_button.clicked.connect(lambda: self._pick_file(self.template_file_input, "JSON 文件 (*.json)"))
+            file_import_button = QPushButton("导入到编辑器", file_card)
+            file_import_button.setObjectName("primaryButton")
+            file_import_button.clicked.connect(self._import_template_from_file)
+            file_row.addWidget(self.template_file_input, 1)
+            file_row.addWidget(file_browse_button)
+            file_row.addWidget(file_import_button)
+            file_layout.addLayout(file_row)
+
+            ocr_card = QGroupBox("使用 Agent OCR 功能新建模板", self.template_scroll_content)
+            ocr_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            ocr_layout = QVBoxLayout(ocr_card)
+            ocr_hint = QLabel("选择多张包含实验公式、空白表格或实验报告格式的图片。若图片含已有数据，模型会被要求忽略具体数值，只抽象字段和公式。", ocr_card)
+            ocr_hint.setObjectName("themeHint")
+            ocr_hint.setWordWrap(True)
+            self.template_ocr_images_input = compact_editor(ocr_card, "每行一个图片路径；也可以点击“选择图片”多选。", 110, minimum=82)
+            self.template_ocr_note_input = compact_editor(ocr_card, "可选：填写实验名称、教材章节、希望使用的模板 ID、字段命名偏好等。", 96, minimum=74)
+            ocr_buttons = QHBoxLayout()
+            ocr_browse_button = QPushButton("选择图片", ocr_card)
+            ocr_browse_button.clicked.connect(self._pick_template_ocr_images)
+            ocr_generate_button = QPushButton("LLM OCR 生成模板", ocr_card)
+            ocr_generate_button.setObjectName("primaryButton")
+            ocr_generate_button.clicked.connect(self._run_template_ocr)
+            ocr_buttons.addWidget(ocr_browse_button)
+            ocr_buttons.addStretch(1)
+            ocr_buttons.addWidget(ocr_generate_button)
+            ocr_layout.addWidget(ocr_hint)
+            ocr_layout.addWidget(QLabel("实验图片", ocr_card))
+            ocr_layout.addWidget(self.template_ocr_images_input)
+            ocr_layout.addWidget(QLabel("OCR 备注", ocr_card))
+            ocr_layout.addWidget(self.template_ocr_note_input)
+            ocr_layout.addLayout(ocr_buttons)
+
+            report_card = QGroupBox("使用实验报告新建模板", self.template_scroll_content)
+            report_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            report_layout = QVBoxLayout(report_card)
+            report_hint = QLabel(
+                "导入 .pdf / .docx / .docm / .doc 实验报告文件。程序会先本地提取可读文本，再交给 LLM 抽象模板；如果是纯图片扫描件，提取可能不完整。",
+                report_card,
+            )
+            report_hint.setObjectName("themeHint")
+            report_hint.setWordWrap(True)
+            file_row = QHBoxLayout()
+            self.template_report_input = QLineEdit(report_card)
+            self.template_report_input.setPlaceholderText("选择实验报告文件")
+            report_browse_button = QPushButton("浏览", report_card)
+            report_browse_button.clicked.connect(lambda: self._pick_file(self.template_report_input, "实验报告文件 (*.pdf *.docx *.docm *.doc)"))
+            report_generate_button = QPushButton("LLM 读取报告生成模板", report_card)
+            report_generate_button.setObjectName("primaryButton")
+            report_generate_button.clicked.connect(self._run_template_report_ocr)
+            file_row.addWidget(self.template_report_input, 1)
+            file_row.addWidget(report_browse_button)
+            report_action_row = QHBoxLayout()
+            report_action_row.addStretch(1)
+            report_action_row.addWidget(report_generate_button)
+            self.template_report_note_input = compact_editor(report_card, "可选：填写实验名称、章节、希望保留的模板 ID、字段命名偏好等。", 96, minimum=74)
+            report_layout.addWidget(report_hint)
+            report_layout.addLayout(file_row)
+            report_layout.addWidget(QLabel("报告备注", report_card))
+            report_layout.addWidget(self.template_report_note_input)
+            report_layout.addLayout(report_action_row)
+
+            self.template_status_label = QLabel("", self.template_scroll_content)
+            self.template_status_label.setObjectName("themeHint")
+            self.template_status_label.setWordWrap(True)
+
+            template_layout.addWidget(catalog_card)
+            template_layout.addWidget(paste_card)
+            template_layout.addWidget(file_card)
+            template_layout.addWidget(ocr_card)
+            template_layout.addWidget(report_card)
+            template_layout.addWidget(self.template_status_label)
+
+            self.template_scroll_area.setWidget(self.template_scroll_content)
+            layout.addWidget(self.template_scroll_area, 1)
+            self._load_template_catalog_editor()
+            return tab
+
         def _build_report_note_controls(self, parent: QWidget) -> tuple[QGroupBox, QCheckBox, QPlainTextEdit]:
             note_card = QGroupBox("报告生成备注", parent)
             note_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1604,6 +1797,183 @@ def launch_ui(argv: list[str] | None = None) -> int:
             if path:
                 target.setText(path)
 
+        def _pick_template_ocr_images(self) -> None:
+            paths, _ = QFileDialog.getOpenFileNames(
+                self,
+                "选择实验模板图片",
+                str(Path.cwd()),
+                "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff)",
+            )
+            if paths:
+                self.template_ocr_images_input.setPlainText("\n".join(paths))
+
+        def _template_report_document_path(self) -> Path:
+            file_path_text = self.template_report_input.text().strip()
+            if not file_path_text:
+                raise ValueError("请先选择实验报告文件。")
+            file_path = resolve_input_path(file_path_text)
+            if not file_path.is_file():
+                raise ValueError(f"实验报告文件不存在或不是文件：{file_path}")
+            if file_path.suffix.lower() not in {".pdf", ".docx", ".docm", ".doc"}:
+                raise ValueError("仅支持 .pdf、.docx、.docm 和 .doc 实验报告文件。")
+            return file_path
+
+        def _load_template_catalog_editor(self) -> None:
+            catalog = read_experiment_catalog()
+            validate_experiment_catalog(catalog)
+            self.template_catalog_editor.setPlainText(experiment_catalog_text(catalog))
+            self._set_template_status(f"已载入 {len(catalog.get('experiments') or [])} 个模板。")
+
+        def _template_catalog_from_editor(self) -> dict:
+            text = self.template_catalog_editor.toPlainText().strip()
+            if not text:
+                raise ValueError("模板编辑器为空。")
+            catalog = normalize_experiment_catalog(json.loads(text))
+            return catalog
+
+        def _set_template_catalog_editor(self, catalog: dict, message: str) -> None:
+            normalized_catalog = normalize_experiment_catalog(catalog)
+            self.template_catalog_editor.setPlainText(experiment_catalog_text(normalized_catalog))
+            self._set_template_status(message)
+
+        def _set_template_status(self, message: str) -> None:
+            if hasattr(self, "template_status_label"):
+                self.template_status_label.setText(message)
+            if hasattr(self, "status_label"):
+                self._set_status(message)
+
+        def _validate_template_catalog_editor(self) -> None:
+            try:
+                catalog = self._template_catalog_from_editor()
+                self._set_template_status(f"模板 JSON 校验通过，共 {len(catalog.get('experiments') or [])} 个模板。")
+            except Exception as exc:
+                self._show_error(exc)
+
+        def _format_template_catalog_editor(self) -> None:
+            try:
+                catalog = self._template_catalog_from_editor()
+                self._set_template_catalog_editor(catalog, "模板 JSON 已格式化。")
+            except Exception as exc:
+                self._show_error(exc)
+
+        def _save_template_catalog_editor(self) -> None:
+            try:
+                catalog = self._template_catalog_from_editor()
+                save_experiment_catalog(catalog)
+                reload_experiment_catalog()
+                self._refresh_experiment_combo()
+                self._set_template_catalog_editor(catalog, f"模板目录已保存：{experiments_dir()}")
+                QMessageBox.information(self, "保存成功", "模板目录已保存，并已刷新实验列表。")
+            except Exception as exc:
+                self._show_error(exc)
+
+        def _import_template_from_paste(self) -> None:
+            try:
+                text = self.template_paste_input.toPlainText().strip()
+                if not text:
+                    raise ValueError("请先粘贴模板 JSON。")
+                self._import_template_text_to_editor(text, source="粘贴内容")
+            except Exception as exc:
+                self._show_error(exc)
+
+        def _import_template_from_file(self) -> None:
+            try:
+                file_path_text = self.template_file_input.text().strip()
+                if not file_path_text:
+                    raise ValueError("请先选择模板 JSON 文件。")
+                file_path = resolve_input_path(file_path_text)
+                if not file_path.is_file():
+                    raise ValueError(f"模板 JSON 文件不存在或不是文件：{file_path}")
+                self._import_template_text_to_editor(file_path.read_text(encoding="utf-8"), source=str(file_path))
+            except Exception as exc:
+                self._show_error(exc)
+
+        def _import_template_text_to_editor(self, text: str, *, source: str) -> None:
+            payload = json.loads(text)
+            base_catalog = self._template_catalog_from_editor()
+            catalog = normalize_template_payload(payload, base_catalog=base_catalog)
+            self._set_template_catalog_editor(catalog, f"已从 {source} 导入模板草稿；请检查后保存。")
+
+        def _template_ocr_image_paths(self) -> list[Path]:
+            raw_paths = [line.strip() for line in self.template_ocr_images_input.toPlainText().splitlines() if line.strip()]
+            if not raw_paths:
+                raise ValueError("请至少选择一张模板图片。")
+            image_paths = []
+            for raw_path in raw_paths:
+                image_path = resolve_input_path(raw_path)
+                if not image_path.is_file():
+                    raise ValueError(f"模板图片不存在或不是文件：{image_path}")
+                image_paths.append(image_path)
+            return image_paths
+
+        def _run_template_ocr(self) -> None:
+            try:
+                settings = self._collect_settings()
+                if not settings.is_llm_ready:
+                    raise LLMError("请先填写 Base URL、Model 和 API Key。")
+                image_paths = self._template_ocr_image_paths()
+                note = self.template_ocr_note_input.toPlainText().strip()
+                current_catalog = self._template_catalog_from_editor()
+
+                def job() -> dict:
+                    return LLMClient(settings).generate_experiment_template(image_paths, current_catalog, note=note)
+
+                def handle_success(result: object) -> None:
+                    if not isinstance(result, dict):
+                        raise TypeError(f"模板 OCR 返回结果格式不正确：{type(result)!r}")
+                    catalog = normalize_generated_template_payload(result, base_catalog=current_catalog)
+                    self._set_template_catalog_editor(catalog, "LLM OCR 已生成并校验模板草稿；请检查后保存。")
+
+                self._begin_background_task(
+                    "正在通过 LLM OCR 生成模板...",
+                    processing_word="Thinking",
+                    job=job,
+                    on_success=handle_success,
+                )
+            except Exception as exc:
+                self._show_error(exc)
+
+        def _run_template_report_ocr(self) -> None:
+            try:
+                settings = self._collect_settings()
+                if not settings.is_llm_ready:
+                    raise LLMError("请先填写 Base URL、Model 和 API Key。")
+                document_path = self._template_report_document_path()
+                note = self.template_report_note_input.toPlainText().strip()
+                current_catalog = self._template_catalog_from_editor()
+
+                def job() -> dict:
+                    return LLMClient(settings).generate_experiment_template_from_report(document_path, current_catalog, note=note)
+
+                def handle_success(result: object) -> None:
+                    if not isinstance(result, dict):
+                        raise TypeError(f"实验报告模板 OCR 返回结果格式不正确：{type(result)!r}")
+                    catalog = normalize_generated_template_payload(result, base_catalog=current_catalog)
+                    self._set_template_catalog_editor(catalog, "实验报告模板已生成并校验；请检查后保存。")
+
+                self._begin_background_task(
+                    "正在通过实验报告生成模板...",
+                    processing_word="Thinking",
+                    job=job,
+                    on_success=handle_success,
+                )
+            except Exception as exc:
+                self._show_error(exc)
+
+        def _refresh_experiment_combo(self) -> None:
+            if not hasattr(self, "experiment_combo"):
+                return
+            current_id = self.experiment_combo.currentData()
+            experiments = list_experiments()
+            self.experiment_combo.blockSignals(True)
+            self.experiment_combo.clear()
+            for experiment in experiments:
+                self.experiment_combo.addItem(experiment["name"], experiment["id"])
+            selected_index = self.experiment_combo.findData(current_id)
+            self.experiment_combo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
+            self.experiment_combo.blockSignals(False)
+            self._refresh_experiment_dependent_ui()
+
         def _open_output_dir(self) -> None:
             from .paths import output_root
 
@@ -1640,11 +2010,13 @@ def launch_ui(argv: list[str] | None = None) -> int:
 
             self._pending_task_success_callback = on_success
 
-            worker.finished.connect(self._queue_background_task_success)
-            worker.failed.connect(self._queue_background_task_failure)
+            worker.finished.connect(self._store_background_task_success)
+            worker.failed.connect(self._store_background_task_failure)
             worker.finished.connect(thread.quit)
             worker.failed.connect(thread.quit)
-            thread.finished.connect(worker.deleteLater)
+            worker.finished.connect(worker.deleteLater)
+            worker.failed.connect(worker.deleteLater)
+            thread.finished.connect(self._process_background_task_completion)
             thread.finished.connect(thread.deleteLater)
             thread.started.connect(worker.run)
 
@@ -1660,30 +2032,31 @@ def launch_ui(argv: list[str] | None = None) -> int:
             self._pending_task_error = None
             self._set_busy(False, "")
 
-        def _queue_background_task_success(self, result: object) -> None:
+        def _store_background_task_success(self, result: object) -> None:
             self._pending_task_result = result
-            QTimer.singleShot(0, self, self._process_background_task_success)
 
-        def _queue_background_task_failure(self, exc: object) -> None:
+        def _store_background_task_failure(self, exc: object) -> None:
             self._pending_task_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
-            QTimer.singleShot(0, self, self._process_background_task_failure)
 
         @Slot()
-        def _process_background_task_success(self) -> None:
+        def _process_background_task_completion(self) -> None:
             callback = self._pending_task_success_callback
             result = self._pending_task_result
+            error = self._pending_task_error
+            self._active_task_thread = None
+            self._active_task_worker = None
+            self._pending_task_success_callback = None
+            self._pending_task_result = None
+            self._pending_task_error = None
+            self._set_busy(False, "")
             try:
-                self._clear_background_task()
+                if error is not None:
+                    self._show_error(error)
+                    return
                 if callback is not None:
                     callback(result)
             except Exception as exc:  # pragma: no cover - forwarded to UI
                 self._show_error(exc)
-
-        @Slot()
-        def _process_background_task_failure(self) -> None:
-            exc = self._pending_task_error or RuntimeError("后台任务失败。")
-            self._clear_background_task()
-            self._show_error(exc)
 
         def _generate_from_manual(self) -> None:
             try:
@@ -2057,7 +2430,7 @@ def launch_ui(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app_icon = QIcon(str(app_icon_path()))
     app.setApplicationName("PhyExpAssistant")
-    app.setApplicationDisplayName("PhyExpAssistant Demo")
+    app.setApplicationDisplayName("PhyExpAssistant")
     app.setWindowIcon(app_icon)
     window = MainWindow()
     window.setWindowIcon(app_icon)
@@ -2078,7 +2451,7 @@ def _build_header(settings_button: object, processing_indicator: object, scale: 
     title_box = QVBoxLayout()
     title_box.setContentsMargins(0, 0, 0, 0)
     title_box.setSpacing(_scaled(2, scale, minimum=1))
-    title = QLabel("PhyExpAssistant Demo")
+    title = QLabel("PhyExpAssistant")
     title.setObjectName("headerTitle")
     subtitle = QLabel("Powered by PatriciaOfEnd & LyCecilion - 大学物理实验轻量化、自动化解决方案")
     subtitle.setObjectName("headerSubtitle")

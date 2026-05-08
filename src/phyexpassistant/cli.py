@@ -42,7 +42,7 @@ def _pause_before_menu() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
-    parser = argparse.ArgumentParser(description="PhyExpAssistant demo")
+    parser = argparse.ArgumentParser(description="PhyExpAssistant")
     parser.add_argument("--ui", action="store_true", help="启动 PySide6 图形界面")
     parser.add_argument("--no-llm", action="store_true", help="手动录入生成报告时不调用 LLM；手写识别仍需 LLM API")
     args = parser.parse_args(argv)
@@ -59,13 +59,13 @@ def main(argv: list[str] | None = None) -> int:
 def _interactive_loop(settings: Settings, *, use_llm: bool = True) -> int:
     while True:
         _clear_screen()
-        print("\n=== PhyExpAssistant Demo ===")
+        print("\n=== PhyExpAssistant ===")
         print(f"LLM Base URL: {settings.base_url}")
         print(f"LLM Model: {settings.model}")
         print(f"API Key: {settings.masked_api_key}")
         print("1. 设置 API Key / Model")
         print("2. 生成报告：手动录入")
-        print("3. 生成报告：手写图片（LLM OCR demo）")
+        print("3. 生成报告：手写图片（LLM OCR）")
         print("4. 查看支持的实验")
         print("0. 退出")
         choice = input("请选择：").strip()
@@ -192,7 +192,7 @@ def _run_request(request: dict, settings: Settings, *, use_llm: bool = True) -> 
 
 
 def _print_experiments() -> None:
-    print("\n当前 demo 支持：")
+    print("\n当前支持：")
     for index, experiment in enumerate(list_experiments(), start=1):
         print(f"{index}. {experiment['name']}（{experiment['description']}）")
 

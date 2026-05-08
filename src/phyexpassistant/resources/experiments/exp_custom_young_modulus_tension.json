@@ -1,0 +1,115 @@
+{
+  "id": "exp_custom_young_modulus_tension",
+  "name": "拉伸法测量钢丝杨氏弹性模量",
+  "category": "mechanics",
+  "description": "用拉伸法和光杠杆法测量金属丝受力后的微小伸长量，结合金属丝长度、直径、光杠杆臂长和标尺距离计算钢丝的杨氏弹性模量。",
+  "report_mode": "llm",
+  "fields": {
+    "load_mass": {
+      "label": "拉力质量",
+      "base_unit": "kg",
+      "accepted_units": [
+        "kg",
+        "g"
+      ],
+      "min": 0,
+      "max": 10
+    },
+    "scale_reading_loading": {
+      "label": "增荷时光标示值",
+      "base_unit": "m",
+      "accepted_units": [
+        "m",
+        "cm",
+        "mm"
+      ],
+      "min": 0,
+      "max": 1
+    },
+    "scale_reading_unloading": {
+      "label": "减荷时光标示值",
+      "base_unit": "m",
+      "accepted_units": [
+        "m",
+        "cm",
+        "mm"
+      ],
+      "min": 0,
+      "max": 1
+    },
+    "wire_diameter": {
+      "label": "钢丝直径",
+      "base_unit": "m",
+      "accepted_units": [
+        "m",
+        "mm",
+        "cm"
+      ],
+      "min": 0.0001,
+      "max": 0.005
+    },
+    "wire_length": {
+      "label": "金属丝长度",
+      "base_unit": "m",
+      "accepted_units": [
+        "m",
+        "cm",
+        "mm"
+      ],
+      "min": 0.1,
+      "max": 3
+    },
+    "optical_lever_arm": {
+      "label": "光杠杆臂长",
+      "base_unit": "m",
+      "accepted_units": [
+        "m",
+        "cm",
+        "mm"
+      ],
+      "min": 0.01,
+      "max": 0.5
+    },
+    "mirror_scale_distance": {
+      "label": "望远镜到标尺距离",
+      "base_unit": "m",
+      "accepted_units": [
+        "m",
+        "cm",
+        "mm"
+      ],
+      "min": 0.2,
+      "max": 5
+    }
+  },
+  "formula_hints": [
+    "金属丝横截面积：S=\\frac{\\pi d^2}{4}",
+    "正应力与线应变关系：\\frac{F}{S}=Y\\frac{\\Delta L}{L}",
+    "光杠杆关系：\\Delta x=\\frac{2H}{D}\\Delta L",
+    "逐差法常用计算式：Y=\\frac{8mgLH}{\\pi d^2D\\Delta x}，其中 m 为相邻分组对应的增量质量，\\Delta x 为对应标尺读数差"
+  ],
+  "table_hints": [
+    "拉伸测量表按序号记录拉力质量 M/kg，以及增荷时和减荷时的光标示值 x_i，单位常见为 cm；平均值、差值和最终结果不作为录入字段。",
+    "钢丝直径测量表按上部、中部、下部及纵向、横向等位置记录多次直径 d/mm；只录入各次直径原始读数。",
+    "辅助尺寸记录包括金属丝长度 L、光杠杆臂长 H、望远镜到标尺距离 D；表中已填写的具体手写数值仅用于识别字段，不写入模板。"
+  ],
+  "render_contract": [
+    "report_mode",
+    "student_name",
+    "student_id",
+    "class_name",
+    "experiment_name",
+    "experiment_date",
+    "raw_headers",
+    "raw_rows",
+    "generic_formula_lines",
+    "generic_processing_summary",
+    "generic_result_headers",
+    "generic_result_rows",
+    "uncertainty_summary",
+    "final_result",
+    "result_summary",
+    "error_analysis",
+    "figures"
+  ]
+}

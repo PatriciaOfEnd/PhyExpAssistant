@@ -1,0 +1,85 @@
+{
+  "id": "exp_003",
+  "name": "惠斯通电桥测电阻",
+  "category": "electricity",
+  "description": "用于测试多参数手写表格识别的非单摆实验模板。",
+  "report_mode": "llm",
+  "fields": {
+    "standard_resistance": {
+      "label": "标准电阻",
+      "base_unit": "Ω",
+      "accepted_units": [
+        "Ω",
+        "kΩ"
+      ],
+      "min": 1,
+      "max": 1000000
+    },
+    "bridge_ratio": {
+      "label": "比率臂比值",
+      "base_unit": "ratio",
+      "accepted_units": [
+        "ratio"
+      ],
+      "min": 0.1,
+      "max": 1000
+    },
+    "balance_length": {
+      "label": "平衡长度",
+      "base_unit": "cm",
+      "accepted_units": [
+        "cm",
+        "m"
+      ],
+      "min": 0,
+      "max": 100
+    },
+    "supply_voltage": {
+      "label": "电源电压",
+      "base_unit": "V",
+      "accepted_units": [
+        "V"
+      ],
+      "min": 0,
+      "max": 30
+    },
+    "ambient_temperature": {
+      "label": "环境温度",
+      "base_unit": "°C",
+      "accepted_units": [
+        "°C"
+      ],
+      "min": -20,
+      "max": 50
+    },
+    "wire_current": {
+      "label": "桥路电流",
+      "base_unit": "mA",
+      "accepted_units": [
+        "mA",
+        "A"
+      ],
+      "min": 0,
+      "max": 2000
+    }
+  },
+  "render_contract": [
+    "report_mode",
+    "student_name",
+    "student_id",
+    "class_name",
+    "experiment_name",
+    "experiment_date",
+    "raw_headers",
+    "raw_rows",
+    "generic_formula_lines",
+    "generic_processing_summary",
+    "generic_result_headers",
+    "generic_result_rows",
+    "uncertainty_summary",
+    "final_result",
+    "result_summary",
+    "error_analysis",
+    "figures"
+  ]
+}

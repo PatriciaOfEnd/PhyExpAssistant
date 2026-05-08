@@ -1,0 +1,49 @@
+{
+  "id": "exp_002",
+  "name": "单摆周期与摆长关系验证",
+  "category": "mechanics",
+  "description": "使用摆长 L 与周期 T 数据验证 T² 与 L 的线性关系，并估算重力加速度 g。",
+  "report_mode": "llm",
+  "fields": {
+    "length": {
+      "label": "摆长",
+      "base_unit": "m",
+      "accepted_units": [
+        "m",
+        "cm",
+        "mm"
+      ],
+      "min": 0.05,
+      "max": 5.0
+    },
+    "period": {
+      "label": "周期",
+      "base_unit": "s",
+      "accepted_units": [
+        "s",
+        "ms"
+      ],
+      "min": 0.1,
+      "max": 20.0
+    }
+  },
+  "render_contract": [
+    "report_mode",
+    "student_name",
+    "student_id",
+    "class_name",
+    "experiment_name",
+    "experiment_date",
+    "raw_headers",
+    "raw_rows",
+    "generic_formula_lines",
+    "generic_processing_summary",
+    "generic_result_headers",
+    "generic_result_rows",
+    "uncertainty_summary",
+    "final_result",
+    "result_summary",
+    "error_analysis",
+    "figures"
+  ]
+}

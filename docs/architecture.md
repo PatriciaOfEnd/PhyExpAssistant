@@ -1,6 +1,6 @@
-# Demo 架构说明
+# 架构说明
 
-本 demo 对应 `项目可行性探索.md` 中的推荐方向：确定性工作流 + LLM 辅助 + 模板输出。
+本项目采用 `项目可行性探索.md` 中的推荐方向：确定性工作流 + LLM 辅助 + 模板输出。
 
 ## 流程
 
@@ -8,6 +8,7 @@
 CLI 交互
   -> 设置 API Key / Model
   -> 读取手动输入或 LLM OCR 图片
+  -> 可在 UI 模板管理页编辑/导入/生成实验模板
   -> 标准化单位和字段
   -> LLM 生成报告文字与绘图计划
   -> 本地仅做安全绘图与文档渲染
@@ -20,14 +21,21 @@ CLI 交互
 - `src/phyexpassistant/cli.py`：用户交互界面。
 - `src/phyexpassistant/ui.py`：PySide6 扁平化桌面 UI。
 - `src/phyexpassistant/settings.py`：本地 LLM 设置读写。
-- `src/phyexpassistant/llm_client.py`：OpenAI 兼容 Chat Completions 调用，包含图片 OCR demo。
+- `src/phyexpassistant/llm_client.py`：OpenAI 兼容 Chat Completions 调用，包含图片 OCR 和模板抽取。
 - `src/phyexpassistant/workflow.py`：输入标准化、LLM 报告编排、安全绘图调度、产物写入。
 - `src/phyexpassistant/docx_writer.py`：无第三方依赖的最小 `.docx` 生成器。
-- `src/phyexpassistant/experiments.py`：demo 题库注册。
+- `src/phyexpassistant/experiments.py`：实验模板加载、校验、合并和保存。
+- `src/phyexpassistant/resources/experiments/*.json`：内置实验模板目录，每个实验一个 JSON 文件，运行时聚合为内部 catalog。
+- `src/phyexpassistant/prompts/template_ocr.txt`：Agent OCR 新建模板时使用的系统提示词。
 
 ## 边界
 
 - LLM 负责实验专属报告内容和绘图计划，但本地不执行 LLM 返回的代码。
+- UI 的“模板管理”页可以编辑完整模板目录，也可以粘贴/导入 JSON，或者使用视觉 LLM 从多张公式、讲义、空白表格图片生成单个模板对象，再由本地追加到目录。
+- 同一页还支持导入 `.pdf` / `.docx` / `.docm` / `.doc` 实验报告文件；程序会先在本地提取可读文本，再交给 LLM 抽象模板。
+- 模板导入和 Agent OCR 结果都必须通过模板 schema 校验；无效 JSON 不会写入模板目录。
+- LLM 生成模板只能提供实验表格中的原始测量字段，不能包含不确定度、误差、标准差或派生结果字段。
+- 图片模板抽取提示词在 `src/phyexpassistant/prompts/template_ocr.txt`，实验报告模板抽取提示词在 `src/phyexpassistant/prompts/template_report.txt`。
 - LLM 需要用 `{{LaTeXbegin}}...{{LaTeXend}}` 标记可渲染的 LaTeX 公式，本地 Word 渲染器会将其转为 Office Math。
 - Word 报告模板按“原始实验数据 -> 实验数据处理 -> 实验结果 -> 不确定度计算 -> 误差分析/课后思考题”的顺序组织。
 - “原始实验数据”展示手动页选择的实验报告照片或 OCR 原图；“实验结果”展示逐行公式和脱式计算；“不确定度计算”展示 A 类、B 类和总不确定度。

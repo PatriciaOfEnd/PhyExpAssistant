@@ -1,4 +1,4 @@
-# PhyExpAssistant Demo
+# PhyExpAssistant
 
 > [!WARNING]
 > 该项目全部由 LLM 生成 (vibe coding) ，可能存在包括但不限于架构混乱，逻辑不明，大量 bug 等，在人工介入修改前，不建议任何人审计此项目。为您带来的糟糕阅读体验，我们深感抱歉。开始审计此项目，代表着您已经充分认识到审计此项目可能带来的潜在风险，开发者对您可能出现的任何心脑血管疾病不负任何责任。
@@ -26,6 +26,7 @@ cd PhyExpAssistant
 
 - 支持实验模板：`exp_001` 单摆测重力加速度、`exp_002` 单摆周期与摆长关系验证、`exp_003` 惠斯通电桥测电阻。
 - 支持输入：手动录入、手写图片 LLM OCR 草稿。
+- 支持模板管理：UI 右侧“模板管理”页可编辑、校验和保存模板，也可粘贴、导入 JSON 或通过 Agent OCR 从图片生成新模板。
 - 支持 LLM 报告生成：根据实验模板生成公式说明、数据处理、结果总结和误差分析。
 - 支持 UI 备注分流：手写识别备注只影响 OCR prompt，报告生成备注默认关闭且只影响报告文字 prompt。
 - 支持公式标记渲染：LLM 返回的 LaTeX 公式需使用 `{{LaTeXbegin}}...{{LaTeXend}}` 标记，本地生成 Word 时会转为 Word 公式。
@@ -41,41 +42,41 @@ cd PhyExpAssistant
 无需安装依赖，直接运行：
 
 ```bash
-python demo.py
+python main.py
 ```
 
 Windows 也可以直接运行：
 
 ```powershell
-py -3 demo.py
+py -3 main.py
 ```
 
 Linux 也可以直接运行：
 
 ```bash
-python3 demo.py
+python3 main.py
 ```
 
 启动图形界面：
 
 ```bash
-python demo.py --ui
+python main.py --ui
 ```
 
 Windows / Linux 可分别使用：
 
 ```powershell
-py -3 demo.py --ui
+py -3 main.py --ui
 ```
 
 ```bash
-python3 demo.py --ui
+python3 main.py --ui
 ```
 
 如果你想在 CLI 中本地验证手动录入，并跳过 LLM 报告文字生成，可用：
 
 ```bash
-python demo.py --no-llm
+python main.py --no-llm
 ```
 
 注意：手写识别仍需要配置可用的 LLM API。
@@ -91,13 +92,13 @@ pip install -e ".[ui]"
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -e ".[ui]"
-.venv/bin/python demo.py --ui
+.venv/bin/python main.py --ui
 ```
 
 使用国内源安装 PySide6（Windows PowerShell）：
 
 ```powershell
-py -3 -m venv .venv; .\.venv\Scripts\python.exe -m pip install -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -e ".[ui]"; .\.venv\Scripts\python.exe demo.py --ui
+py -3 -m venv .venv; .\.venv\Scripts\python.exe -m pip install -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -e ".[ui]"; .\.venv\Scripts\python.exe main.py --ui
 ```
 
 现在 CLI 只提供两类生成入口：手动录入与手写识别；不再提供 JSON/CSV 输入入口。
@@ -127,9 +128,23 @@ py -3 -m venv .venv; .\.venv\Scripts\python.exe -m pip install -i https://mirror
 
 这两个环境变量在 Windows 和 Linux 上都支持。
 
+## 实验模板管理
+
+实验模板文件位于 `src/phyexpassistant/resources/experiments/`，每个实验一个独立 `.json` 文件，例如 `exp_001.json`。单个模板至少包含 `id`、`name`、`category`、`description`、`report_mode` 和 `fields`；`fields` 中每个字段需要 `label`、`base_unit`、`accepted_units`，可选 `min` / `max` 作为校验范围。模板还可以添加 `formula_hints` 和 `table_hints`，用于把实验公式、表格结构和数据处理线索传给 LLM。程序运行时会自动把目录内多个模板聚合成内部 catalog。
+
+UI 右侧“模板管理”页提供五类操作：
+
+- `管理现有模板`：编辑模板目录的合并视图，支持重新载入、校验、格式化和保存；保存时会按实验 `id` 写回多个 `.json` 文件。
+- `Agent OCR 新建模板`：选择多张包含实验公式、讲义页、空白表格或实验报告格式的图片，由视觉 LLM 直接返回单个实验模板对象，本地校验后追加到当前模板目录。
+- `使用实验报告新建模板`：导入 `.pdf`、`.docx`、`.docm` 或 `.doc` 实验报告文件，本地提取可读文本后交给 LLM 抽象模板；纯图片扫描件可能需要先做文字识别。
+- `直接粘贴导入模板`：粘贴完整模板目录合并 JSON、单个实验对象，或 `{ "experiment": {...} }` 后合并到当前草稿。
+- `从 JSON 文件导入模板`：选择本地 JSON 文件并合并到当前模板草稿。
+
+所有导入和 OCR 结果都会先在本地校验；无效模板不会写入文件。Agent OCR 和实验报告抽取都只返回单个实验对象，随后由本地合并到草稿，用户确认保存时写入模板目录。LLM 生成模板时只允许输出实验表格中的原始测量字段，不允许输出不确定度、误差、标准差或派生结果字段。图片模板抽取提示词在 `src/phyexpassistant/prompts/template_ocr.txt`，实验报告模板抽取提示词在 `src/phyexpassistant/prompts/template_report.txt`，报告正文生成提示词逻辑在 `src/phyexpassistant/llm_client.py` 的 `generate_report_content()`。
+
 ## 手写图片识别说明
 
-当前 demo 暂时用多模态 LLM 直接做 OCR，不接入专用 OCR 引擎。流程是：
+当前版本暂时用多模态 LLM 直接做 OCR，不接入专用 OCR 引擎。流程是：
 
 ```text
 图片 -> LLM 识别为结构化草稿 -> 用户确认 -> schema/单位/范围校验 -> 计算 -> docx
